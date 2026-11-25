@@ -76,6 +76,21 @@ elif case == "whiteout":
     add("usr/share/zoneinfo/.wh.UTC")
 elif case == "hard-out":
     add("usr/share/zoneinfo/Evil", "hard", link="etc/apk/world")
+elif case == "lock-ok":
+    add("lib/apk/db/lock", data=b"")
+elif case == "lock-content":
+    add("lib/apk/db/lock", data=b"x")
+elif case == "lock-writable":
+    add("lib/apk/db/lock", mode=0o666, data=b"")
+elif case == "multi-bad":
+    add("usr/local/bin/x", mode=0o755)
+    add("usr/local/bin/y", mode=0o755)
+    add("etc/passwd")
+    add("usr/share/zoneinfo/.wh.UTC")
+    add("lib/apk/db/lock", data=b"x")
+elif case == "many-bad":
+    for i in range(60):
+        add("opt/f%02d" % i)
 elif case == "root-entry":
     add("./", "dir", 0o777, uid=1000)
 elif case == "xattr":

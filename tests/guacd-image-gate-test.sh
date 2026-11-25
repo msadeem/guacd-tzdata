@@ -90,6 +90,21 @@ expect_fail "(e2) a group/world-writable zoneinfo file" "usr/share/zoneinfo/Asia
   "$GATE" --check-layer "$(layer world-writable-file)" "$PARENTS"
 expect_fail "(e2) a zoneinfo file not owned by root" "usr/share/zoneinfo/Asia/Owned is not owned by root" \
   "$GATE" --check-layer "$(layer not-root)" "$PARENTS"
+expect_pass "an empty lib/apk/db/lock (size 0, root, 0644) passes" "ok: layer content check" \
+  "$GATE" --check-layer "$(layer lock-ok)" "$PARENTS"
+expect_fail "lib/apk/db/lock with content fails" "lib/apk/db/lock must be an empty file (size 0), found 1 bytes" \
+  "$GATE" --check-layer "$(layer lock-content)" "$PARENTS"
+expect_fail "a world-writable lib/apk/db/lock fails" "lib/apk/db/lock is group/world-writable" \
+  "$GATE" --check-layer "$(layer lock-writable)" "$PARENTS"
+out="$("$GATE" --check-layer "$(layer multi-bad)" "$PARENTS" 2>&1)"; rc=$?
+if [[ $rc -ne 0 && "$out" == *"etc/passwd $HINT"* && "$out" == *"usr/local/bin/x $HINT"* && "$out" == *"usr/local/bin/y $HINT"* \
+   && "$out" == *"usr/share/zoneinfo/.wh.UTC is a whiteout"* && "$out" == *"lib/apk/db/lock must be an empty file"* && "$out" == *"5 disallowed entries in total"* ]]; then
+  ok "every disallowed entry is listed, not only the first"
+else bad "every disallowed entry is listed" "rc=$rc $out"; fi
+out="$("$GATE" --check-layer "$(layer many-bad)" "$PARENTS" 2>&1)"; rc=$?
+if [[ $rc -ne 0 && "$out" == *"... and 10 more disallowed entries not shown"* && "$out" == *"60 disallowed entries in total"* ]]; then
+  ok "the report is capped at 50 entries and says how many more"
+else bad "the report is capped" "rc=$rc"; fi
 expect_fail "the layer root entry './' is refused" "the layer root entry '.' is not allowed" \
   "$GATE" --check-layer "$(layer root-entry)" "$PARENTS"
 expect_fail "a PAX extended-attribute record is refused" "usr/share/zoneinfo/Asia/Opaque carries an extended attribute (opaque); not allowed" \
