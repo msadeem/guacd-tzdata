@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """check-public-hygiene -- scan what will be world-readable.
 
-  scripts/check-public-hygiene [--repo DIR]      scan tracked files, the full git log,
-                                                 ref names and annotated tag text
+  scripts/check-public-hygiene [--repo DIR]      scan EVERY blob and path reachable from any
+                                                 ref (read from git, not from the disk), the
+                                                 full commit metadata, ref names and tag text
   scripts/check-public-hygiene --stdin           scan text on stdin (a PR title or body)
 
 Generic patterns come from scripts/deny-patterns (committed) plus one rule: any
-e-mail address except the GitHub noreply form. Project-specific patterns come from
-the untracked file named by HYGIENE_EXTRA_PATTERNS_FILE (one regular expression
-per line, case-insensitive; blank lines and lines starting with # are ignored).
+e-mail address except the GitHub noreply forms (<id>+<user>@users.noreply.github.com
+and exactly noreply@github.com). Project-specific patterns come from the untracked
+file named by HYGIENE_EXTRA_PATTERNS_FILE (one regular expression per line,
+case-insensitive; blank lines and lines starting with # are ignored).
+
+The repository scan refuses a dirty working tree (exit 2): it scans what will be
+pushed, so commit first. Binary blobs are scanned too (bytes decoded as latin-1).
+scripts/deny-patterns is exempt from the GENERIC patterns only (it holds their text);
+the private patterns and the e-mail rule still apply to it.
 
 Output never prints a matched value, only where it matched and how many times.
-Exit 0 clean, 1 findings, 2 usage or setup error.
+Exit 0 clean, 1 findings, 2 usage, setup or dirty-tree error.
 """
 import os
 import re
@@ -20,9 +27,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
-NOREPLY = re.compile(r"@users\.noreply\.github\.com$", re.I)
-# Files that legitimately hold pattern text: the generic list itself.
-SELF_EXCLUDED = {"scripts/deny-patterns"}
+NOREPLY = re.compile(r"(?:@users\.noreply\.github\.com|^noreply@github\.com)$", re.I)
+PATTERN_FILE = "scripts/deny-patterns"
 
 
 def load_patterns():
@@ -54,9 +60,11 @@ def load_patterns():
     return pats, n_extra
 
 
-def scan_text(label, text, pats):
+def scan_text(label, text, pats, generic=True):
     found = []
     for name, rx in pats:
+        if not generic and not name.startswith("private-pattern-"):
+            continue
         c = sum(1 for _ in rx.finditer(text))
         if c:
             found.append((label, name, c))
@@ -66,8 +74,62 @@ def scan_text(label, text, pats):
     return found
 
 
-def git(repo, *args):
-    return subprocess.run(["git", "-C", repo, *args], capture_output=True, check=True).stdout
+def git(repo, *args, data=None):
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, check=True, input=data).stdout
+
+
+def scan_repo(repo, pats):
+    findings, units, binaries = [], 0, 0
+    if git(repo, "status", "--porcelain").strip():
+        print("hygiene: working tree is dirty; commit or stash before the pre-push scan")
+        sys.exit(2)
+    # every object reachable from any ref, with the path it was found under
+    paths = {}
+    order = []
+    for line in git(repo, "rev-list", "--all", "--objects").decode("utf-8", "replace").splitlines():
+        sha, _, path = line.partition(" ")
+        if sha not in paths:
+            paths[sha] = set()
+            order.append(sha)
+        if path:
+            paths[sha].add(path)
+    for sha in order:
+        for path in sorted(paths[sha]):
+            units += 1
+            findings += scan_text("path " + path, path, pats)
+    meta = git(repo, "cat-file", "--batch-check", data=("\n".join(order) + "\n").encode()) if order else b""
+    blobs = [l.split()[0] for l in meta.decode().splitlines() if len(l.split()) == 3 and l.split()[1] == "blob"]
+    if blobs:
+        out = git(repo, "cat-file", "--batch", data=("\n".join(blobs) + "\n").encode())
+        pos = 0
+        for sha in blobs:
+            nl = out.index(b"\n", pos)
+            size = int(out[pos:nl].split()[2])
+            data = out[nl + 1:nl + 1 + size]
+            pos = nl + 1 + size + 1
+            units += 1
+            if b"\0" in data:
+                binaries += 1
+            text = data.decode("latin-1")
+            only_patterns_file = paths[sha] == {PATTERN_FILE}
+            label = "blob %s (%s)" % (sha[:12], ", ".join(sorted(paths[sha])) or "no path")
+            findings += scan_text(label, text, pats, generic=not only_patterns_file)
+    try:
+        log = git(repo, "log", "--all", "--format=%H|%an|%ae|%cn|%ce|%s|%b%x00").decode("utf-8", "replace")
+    except subprocess.CalledProcessError:
+        log = ""
+    for rec in log.split("\0"):
+        rec = rec.strip("\n")
+        if not rec:
+            continue
+        units += 1
+        findings += scan_text("commit " + rec[:12], rec, pats)
+    refs = git(repo, "for-each-ref", "--format=%(refname)%0a%(taggername)%0a%(taggeremail)%0a%(contents)%00").decode("utf-8", "replace")
+    for i, rec in enumerate(refs.split("\0")):
+        if rec.strip():
+            units += 1
+            findings += scan_text("ref #%d" % i, rec, pats)
+    return findings, units, binaries
 
 
 def main():
@@ -81,9 +143,9 @@ def main():
 def _main():
     args = sys.argv[1:]
     pats, n_extra = load_patterns()
-    findings, units = [], 0
+    binaries = 0
     if args == ["--stdin"]:
-        findings += scan_text("stdin", sys.stdin.read(), pats)
+        findings = scan_text("stdin", sys.stdin.read(), pats)
         units = 1
     else:
         repo = os.getcwd()
@@ -92,35 +154,9 @@ def _main():
         elif args:
             print(__doc__)
             sys.exit(2)
-        for path in git(repo, "ls-files", "-z").decode().split("\0"):
-            if not path or path in SELF_EXCLUDED:
-                continue
-            fp = os.path.join(repo, path)
-            if not os.path.isfile(fp):
-                continue
-            data = open(fp, "rb").read()
-            if b"\0" in data:
-                continue
-            units += 1
-            findings += scan_text("file " + path, data.decode("utf-8", "replace"), pats)
-            findings += scan_text("file name " + path, path, pats)
-        try:
-            log = git(repo, "log", "--all", "--format=%H|%an|%ae|%cn|%ce|%s|%b%x00").decode("utf-8", "replace")
-        except subprocess.CalledProcessError:
-            log = ""
-        for rec in log.split("\0"):
-            rec = rec.strip("\n")
-            if not rec:
-                continue
-            units += 1
-            findings += scan_text("commit " + rec[:12], rec, pats)
-        refs = git(repo, "for-each-ref", "--format=%(refname)%0a%(taggername)%0a%(taggeremail)%0a%(contents)%00").decode("utf-8", "replace")
-        for i, rec in enumerate(refs.split("\0")):
-            if rec.strip():
-                units += 1
-                findings += scan_text("ref #%d" % i, rec, pats)
-    print("hygiene: scanned %d unit(s) with %d generic pattern(s) + email rule + %d private pattern(s)"
-          % (units, len(pats) - n_extra, n_extra))
+        findings, units, binaries = scan_repo(repo, pats)
+    print("hygiene: scanned %d unit(s) (%d binary blob(s) included) with %d generic pattern(s) + email rule + %d private pattern(s)"
+          % (units, binaries, len(pats) - n_extra, n_extra))
     if findings:
         for label, name, c in findings:
             print("hygiene: FAIL: %s: %d match(es) of %s" % (label, c, name))
