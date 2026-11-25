@@ -188,7 +188,14 @@ if df:
         err("Dockerfile has no LABEL instruction")
     else:
         body = " ".join(x.replace("\\\n", " ") for x in labels)
-        pairs = re.findall(r'([A-Za-z0-9_.-]+)="([^"]*)"', body)
+        toks = re.findall(r'(\S+?)=("[^"]*"|\S*)', body)
+        rest = re.sub(r'(\S+?)=("[^"]*"|\S*)', "", body).strip()
+        if rest:
+            err("Dockerfile LABEL has text that is not key=\"value\": %s" % rest)
+        for k, v in toks:
+            if not (len(v) >= 2 and v[0] == '"' and v[-1] == '"'):
+                err("label %s must be key=\"value\" (quoted)" % k)
+        pairs = [(k, v.strip('"')) for k, v in toks]
         keys = sorted(k for k, _ in pairs)
         wantk = sorted([
             "org.opencontainers.image.source", "org.opencontainers.image.revision",
