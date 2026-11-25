@@ -18,8 +18,9 @@ time-zone database, this image is no longer needed.
 - `Dockerfile`, `scripts/build-guacd-image`: build the image (`linux/amd64` only).
 - `scripts/guacd-image-gate`, `scripts/guacd-layer-allowlist`: a gate that reads the
   built image, not the build log: the layers are the base's layers plus one, the added
-  layer holds only allowlisted paths, the image config equals the base's (user, entrypoint, command, environment, volumes,
-  working directory and the rest) except for its labels, and a container
+  layer holds only allowlisted paths, the image config equals the base's in the 11 fields a container takes from it (env, cmd,
+  entrypoint, user, volumes, working directory, exposed ports, stop signal, healthcheck,
+  onbuild, shell; only labels may differ), and a container
   shows the zone database working.
 - `tests/guacd-image-gate-test.sh`: the gate's tests (hand-made layers and configs,
   plus a few real-image cases).

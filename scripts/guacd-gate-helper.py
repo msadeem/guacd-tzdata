@@ -250,7 +250,9 @@ OWN_LABELS = {
 }
 
 
-# Every config key except Labels must equal the base's: the layer is the only change.
+# The config fields a container takes from an image (this fixed list of 11 keys) must equal
+# the base's; only Labels may differ. Fields the daemon ignores when creating a container
+# (Hostname, Tty, Image, ArgsEscaped and the like) are not compared.
 COMPARED_KEYS = ["Env", "Cmd", "Entrypoint", "User", "Volumes", "WorkingDir", "ExposedPorts",
                  "StopSignal", "Healthcheck", "OnBuild", "Shell"]
 
