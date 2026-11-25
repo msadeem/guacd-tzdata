@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""check-public-hygiene -- scan what will be world-readable.
+
+  scripts/check-public-hygiene [--repo DIR]      scan tracked files, the full git log,
+                                                 ref names and annotated tag text
+  scripts/check-public-hygiene --stdin           scan text on stdin (a PR title or body)
+
+Generic patterns come from scripts/deny-patterns (committed) plus one rule: any
+e-mail address except the GitHub noreply form. Project-specific patterns come from
+the untracked file named by HYGIENE_EXTRA_PATTERNS_FILE (one regular expression
+per line, case-insensitive; blank lines and lines starting with # are ignored).
+
+Output never prints a matched value, only where it matched and how many times.
+Exit 0 clean, 1 findings, 2 usage or setup error.
+"""
+import os
+import re
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+NOREPLY = re.compile(r"@users\.noreply\.github\.com$", re.I)
+# Files that legitimately hold pattern text: the generic list itself.
+SELF_EXCLUDED = {"scripts/deny-patterns"}
+
+
+def load_patterns():
+    pats = []  # (label, compiled)
+    with open(os.path.join(HERE, "deny-patterns")) as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            name, rx = line.split("\t", 1)
+            pats.append((name, re.compile(rx)))
+    extra = os.environ.get("HYGIENE_EXTRA_PATTERNS_FILE")
+    n_extra = 0
+    if extra:
+        if not os.path.isfile(extra):
+            print("hygiene: HYGIENE_EXTRA_PATTERNS_FILE is set but is not a file")
+            sys.exit(2)
+        with open(extra) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    rx = re.compile(line, re.I)
+                except re.error:
+                    rx = re.compile(re.escape(line), re.I)
+                n_extra += 1
+                pats.append(("private-pattern-%d" % n_extra, rx))
+    return pats, n_extra
+
+
+def scan_text(label, text, pats):
+    found = []
+    for name, rx in pats:
+        c = sum(1 for _ in rx.finditer(text))
+        if c:
+            found.append((label, name, c))
+    c = sum(1 for m in EMAIL.finditer(text) if not NOREPLY.search(m.group(0)))
+    if c:
+        found.append((label, "non-noreply-email", c))
+    return found
+
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, check=True).stdout
+
+
+def main():
+    try:
+        _main()
+    except subprocess.CalledProcessError:
+        print("hygiene: cannot read git data (not a git repository?)")
+        sys.exit(2)
+
+
+def _main():
+    args = sys.argv[1:]
+    pats, n_extra = load_patterns()
+    findings, units = [], 0
+    if args == ["--stdin"]:
+        findings += scan_text("stdin", sys.stdin.read(), pats)
+        units = 1
+    else:
+        repo = os.getcwd()
+        if args[:1] == ["--repo"] and len(args) == 2:
+            repo = args[1]
+        elif args:
+            print(__doc__)
+            sys.exit(2)
+        for path in git(repo, "ls-files", "-z").decode().split("\0"):
+            if not path or path in SELF_EXCLUDED:
+                continue
+            fp = os.path.join(repo, path)
+            if not os.path.isfile(fp):
+                continue
+            data = open(fp, "rb").read()
+            if b"\0" in data:
+                continue
+            units += 1
+            findings += scan_text("file " + path, data.decode("utf-8", "replace"), pats)
+            findings += scan_text("file name " + path, path, pats)
+        try:
+            log = git(repo, "log", "--all", "--format=%H|%an|%ae|%cn|%ce|%s|%b%x00").decode("utf-8", "replace")
+        except subprocess.CalledProcessError:
+            log = ""
+        for rec in log.split("\0"):
+            rec = rec.strip("\n")
+            if not rec:
+                continue
+            units += 1
+            findings += scan_text("commit " + rec[:12], rec, pats)
+        refs = git(repo, "for-each-ref", "--format=%(refname)%0a%(taggername)%0a%(taggeremail)%0a%(contents)%00").decode("utf-8", "replace")
+        for i, rec in enumerate(refs.split("\0")):
+            if rec.strip():
+                units += 1
+                findings += scan_text("ref #%d" % i, rec, pats)
+    print("hygiene: scanned %d unit(s) with %d generic pattern(s) + email rule + %d private pattern(s)"
+          % (units, len(pats) - n_extra, n_extra))
+    if findings:
+        for label, name, c in findings:
+            print("hygiene: FAIL: %s: %d match(es) of %s" % (label, c, name))
+        print("hygiene: %d finding(s)" % len(findings))
+        sys.exit(1)
+    print("hygiene: clean (0 findings)")
+
+
+if __name__ == "__main__":
+    main()

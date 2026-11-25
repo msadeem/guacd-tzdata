@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""check-workflows -- static policy checks on the workflows, Dockerfile and BASE.
+
+  scripts/check-workflows [repo-root]
+
+Every failure prints one "static check: ..." line and the exit status is 1.
+tests/guacd-image-gate-test.sh runs this on the real tree and on mutated copies
+(each mutation must fail with its own message).
+"""
+import glob
+import os
+import re
+import sys
+
+root = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+errors = []
+
+
+def err(msg):
+    errors.append("static check: " + msg)
+
+
+def read(rel):
+    try:
+        return open(os.path.join(root, rel)).read()
+    except OSError:
+        err("%s is missing" % rel)
+        return ""
+
+
+def block(lines, header_re, indent):
+    """Lines (stripped) of the mapping that follows the first line matching header_re at `indent`."""
+    out, inside = [], False
+    for ln in lines:
+        if not inside:
+            if re.match(r"^ {%d}%s\s*$" % (indent, header_re), ln):
+                inside = True
+            continue
+        if ln.strip() == "" or ln.strip().startswith("#"):
+            continue
+        cur = len(ln) - len(ln.lstrip(" "))
+        if cur <= indent:
+            break
+        out.append(ln)
+    return out
+
+
+wfs = sorted(glob.glob(os.path.join(root, ".github/workflows/*.yml")))
+if not wfs:
+    err("no workflow files found")
+for wf in wfs:
+    rel = os.path.relpath(wf, root)
+    text = open(wf).read()
+    lines = text.splitlines()
+    for i, ln in enumerate(lines, 1):
+        m = re.match(r"^\s*-?\s*uses:\s*(\S+)", ln)
+        if m:
+            ref = m.group(1)
+            if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$", ref):
+                err("%s:%d: 'uses: %s' is not pinned by a full 40-hex commit SHA" % (rel, i, ref))
+    if re.search(r"\bpull_request_target\b", text):
+        err("%s uses pull_request_target" % rel)
+    for t in ("schedule", "workflow_call"):
+        if re.search(r"^\s{0,2}%s\s*:" % t, text, re.M):
+            err("%s uses the %s trigger" % (rel, t))
+    if re.search(r"\bsecrets\.", text):
+        err("%s references secrets.* (only the automatic github.token may be used)" % rel)
+    top = [l.strip() for l in block(lines, r"permissions:", 0)]
+    if top != ["contents: read"]:
+        err("%s top-level permissions must be exactly 'contents: read', found %s" % (rel, top))
+
+pub = read(".github/workflows/publish.yml")
+if pub:
+    lines = pub.splitlines()
+    trig = [l.strip() for l in block(lines, r"on:", 0)]
+    if trig != ["workflow_dispatch:"]:
+        err("publish.yml triggers must be exactly workflow_dispatch, found %s" % trig)
+    jobperm = sorted(l.strip() for l in block(lines, r"permissions:", 4))
+    want = sorted(["contents: read", "packages: write", "id-token: write", "attestations: write"])
+    if jobperm != want:
+        err("publish.yml job permissions must be exactly %s, found %s" % (want, jobperm))
+    if "artifact-metadata" in pub:
+        err("publish.yml mentions artifact-metadata (it must be absent)")
+    if "if: github.ref == 'refs/heads/main'" not in pub:
+        err("publish.yml job has no main-only condition")
+    if 'GITHUB_REF" != "refs/heads/main"' not in pub:
+        err("publish.yml has no refuse-anything-but-main guard step")
+    if "persist-credentials: false" not in pub:
+        err("publish.yml checkout lacks persist-credentials: false")
+    if not re.search(r"^\s*concurrency:", pub, re.M):
+        err("publish.yml has no concurrency group")
+    # the attest step and its inputs
+    idx = [i for i, l in enumerate(lines) if re.match(r"^\s*-?\s*uses:\s*actions/attest@", l)]
+    if len(idx) != 1:
+        err("publish.yml must have exactly one actions/attest step, found %d" % len(idx))
+    else:
+        i = idx[0]
+        step = []
+        for l in lines[i + 1:]:
+            if re.match(r"^\s{6}- ", l):
+                break
+            step.append(l.strip())
+        if "push-to-registry: true" not in step:
+            err("the actions/attest step lacks push-to-registry: true")
+        if "create-storage-record: false" not in step:
+            err("the actions/attest step lacks create-storage-record: false")
+
+base = read("BASE").strip()
+if not re.match(r"^guacamole/guacd@sha256:[0-9a-f]{64}$", base):
+    err("BASE is not a guacamole/guacd@sha256:<64 hex> reference")
+for rel in [os.path.relpath(w, root) for w in wfs] + ["scripts/build-guacd-image"]:
+    if re.search(r"sha256:[0-9a-f]{64}", read(rel)):
+        err("%s carries a literal digest; BASE is the only home" % rel)
+if 'BASE' not in read("scripts/build-guacd-image") or '"$ROOT/BASE"' not in read("scripts/build-guacd-image"):
+    err("scripts/build-guacd-image does not read the BASE file")
+if '$(cat BASE)' not in pub:
+    err("publish.yml does not read the BASE file")
+
+df = read("Dockerfile")
+if df:
+    if re.search(r"^ARG BASE=", df, re.M):
+        err("Dockerfile gives ARG BASE a default")
+    if re.search(r"^\s*ENV\b.*\bTZ\b", df, re.M):
+        err("Dockerfile sets a TZ environment variable")
+    if not re.search(r"^FROM \$\{BASE\}\s*$", df, re.M):
+        err("Dockerfile has no plain 'FROM ${BASE}' final stage")
+    m = re.search(r"^LABEL\s+((?:.*\\\n)*.*)$", df, re.M)
+    if not m:
+        err("Dockerfile has no LABEL instruction")
+    else:
+        body = m.group(1).replace("\\\n", " ")
+        pairs = re.findall(r'([A-Za-z0-9_.-]+)="([^"]*)"', body)
+        keys = sorted(k for k, _ in pairs)
+        wantk = sorted([
+            "org.opencontainers.image.source", "org.opencontainers.image.revision",
+            "org.opencontainers.image.created", "org.opencontainers.image.base.name",
+            "org.opencontainers.image.base.digest", "guacd-tzdata.tzdata-version",
+            "guacd-tzdata.workflow-run-id"])
+        if keys != wantk:
+            err("Dockerfile label keys must be exactly %s, found %s" % (wantk, keys))
+        for k, v in pairs:
+            literal = re.sub(r"\$\{[A-Z_]+\}", "", v)
+            if "$" in literal:
+                err("label %s is neither a literal nor a plain build arg" % k)
+        src = dict(pairs).get("org.opencontainers.image.source", "")
+        if not re.match(r"^https://github\.com/[A-Za-z0-9-]+/guacd-tzdata$", src):
+            err("label org.opencontainers.image.source is not the public repo URL")
+    last_user = re.findall(r"^USER (\S+)", df, re.M)
+    if not last_user or last_user[-1] != "guacd":
+        err("Dockerfile does not end as USER guacd")
+
+if errors:
+    print("\n".join(errors))
+    print("static check: %d failure(s)" % len(errors))
+    sys.exit(1)
+print("ok: static checks (pins, triggers, permissions, attest inputs, BASE, labels)")

@@ -1,0 +1,8 @@
+# Generic deny patterns for the public-hygiene scan (scripts/check-public-hygiene).
+# Format: <name><TAB><python regular expression>. Lines starting with # are comments.
+# Project-specific words are NOT kept here; they live in a local untracked file that
+# is passed through HYGIENE_EXTRA_PATTERNS_FILE at scan time.
+ipv4-address	\b(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\b
+absolute-home-path	(?:^|[^A-Za-z0-9_.-])/(?:Users|home)/
+review-id-shape	\br[0-9]+ [CIM]-[0-9]
+time-zone-label	\bPKT\b
