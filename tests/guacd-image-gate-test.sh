@@ -67,6 +67,24 @@ expect_fail "(e) a whiteout entry" "usr/share/zoneinfo/.wh.UTC is a whiteout ent
   "$GATE" --check-layer "$(layer whiteout)" "$PARENTS"
 expect_fail "(e) a hard link whose target is outside the tree" "usr/share/zoneinfo/Evil is a hard link to etc/apk/world, outside usr/share/zoneinfo/" \
   "$GATE" --check-layer "$(layer hard-out)" "$PARENTS"
+expect_fail "(e) symlink 's -> .' plus 'Evil -> s/s/s/../../../etc/shadow' resolves outside" "usr/share/zoneinfo/Evil is a symlink to s/s/s/../../../etc/shadow, outside usr/share/zoneinfo/" \
+  "$GATE" --check-layer "$(layer sym-dot-escape)" "$PARENTS"
+expect_fail "(e) a hard link reached through a symlinked directory" "usr/share/zoneinfo/Hard is a hard link to usr/share/zoneinfo/s/s/UTC through a symlinked directory" \
+  "$GATE" --check-layer "$(layer sym-dot-hard)" "$PARENTS"
+expect_fail "(e) a hard link with .. components" "usr/share/zoneinfo/Asia/Hard is a hard link to usr/share/zoneinfo/Asia/../../../../etc/shadow, outside" \
+  "$GATE" --check-layer "$(layer hard-via-evil)" "$PARENTS"
+expect_fail "(e) a hard link to a symlink" "usr/share/zoneinfo/Asia/Hard is a hard link to the symlink usr/share/zoneinfo/Asia/Link; not allowed" \
+  "$GATE" --check-layer "$(layer hard-to-symlink)" "$PARENTS"
+expect_fail "(e) an entry under a symlinked directory" "usr/share/zoneinfo/D/x is under a symlinked directory" \
+  "$GATE" --check-layer "$(layer under-symlink-dir)" "$PARENTS"
+expect_fail "(e) a symlink loop" "symlink loop (more than 40 hops)" \
+  "$GATE" --check-layer "$(layer sym-loop)" "$PARENTS"
+expect_fail "(e2) a group/world-writable zoneinfo directory" "usr/share/zoneinfo/W is group/world-writable" \
+  "$GATE" --check-layer "$(layer world-writable-dir)" "$PARENTS"
+expect_fail "(e2) a group/world-writable zoneinfo file" "usr/share/zoneinfo/Asia/Ww is group/world-writable" \
+  "$GATE" --check-layer "$(layer world-writable-file)" "$PARENTS"
+expect_fail "(e2) a zoneinfo file not owned by root" "usr/share/zoneinfo/Asia/Owned is not owned by root" \
+  "$GATE" --check-layer "$(layer not-root)" "$PARENTS"
 expect_fail "(e2) a zoneinfo file with the executable bit" "usr/share/zoneinfo/Asia/Run has setuid, setgid or executable bits" \
   "$GATE" --check-layer "$(layer exec)" "$PARENTS"
 expect_fail "(e2) a zoneinfo file with the setuid bit" "usr/share/zoneinfo/Asia/Su has setuid, setgid or executable bits" \
@@ -115,6 +133,26 @@ expect_fail "(g) Config.User root" "config check: Config.User is root, expected 
 expect_fail "a different entrypoint" "config check: Config.Entrypoint" "$GATE" --check-config "$WORK/c-ep.json" "$BASE_REF" "$WORK/base.json"
 expect_fail "a wrong base label" "config check: label org.opencontainers.image.base.name is guacamole/guacd@sha256:other" "$GATE" --check-config "$WORK/c-label.json" "$BASE_REF" "$WORK/base.json"
 
+echo "== gate failure messages with a stub docker (no Docker needed)"
+STUB="$WORK/stub"; mkdir -p "$STUB"
+cat > "$STUB/docker" <<'STUBEOF'
+#!/usr/bin/env bash
+# stub: pull succeeds; save writes an archive holding only an arm64 image
+case "$1" in
+  pull) exit 0 ;;
+  save)
+    out=""; while [[ $# -gt 0 ]]; do [[ "$1" == "-o" ]] && out="$2"; shift; done
+    d="$(mktemp -d)"; mkdir -p "$d/blobs/sha256"
+    echo '{"architecture":"arm64","rootfs":{"diff_ids":["sha256:1"]}}' > "$d/blobs/sha256/$(printf 'a%.0s' $(seq 64))"
+    echo '[{"Config":"blobs/sha256/'"$(printf 'a%.0s' $(seq 64))"'","Layers":[]}]' > "$d/manifest.json"
+    tar -cf "$out" -C "$d" manifest.json blobs ; exit 0 ;;
+esac
+exit 1
+STUBEOF
+chmod +x "$STUB/docker"
+expect_fail "an unpack failure prints its own reason" "FAIL: unpack: no amd64 image in the saved archive" \
+  env PATH="$STUB:$PATH" "$GATE" "stub:image" "$(tr -d '[:space:]' < "$ROOT/BASE")"
+
 echo "== (f) static policy checks, on the real tree and on mutated copies"
 CHECK="$ROOT/scripts/check-workflows"
 expect_pass "the real tree satisfies the static checks" "ok: static checks" "$CHECK" "$ROOT"
@@ -135,9 +173,9 @@ PY
 PUB=".github/workflows/publish.yml"
 mutant unpinned-action "$PUB" "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" "actions/checkout@v7" "is not pinned by a full 40-hex commit SHA"
 mutant extra-permission "$PUB" "      id-token: write" "      id-token: write
-      artifact-metadata: write" "job permissions must be exactly"
+      artifact-metadata: write" "job publish permissions must be exactly"
 mutant missing-permission "$PUB" "      attestations: write
-" "" "job permissions must be exactly"
+" "" "job publish permissions must be exactly"
 mutant missing-storage-input "$PUB" "          create-storage-record: false
 " "" "lacks create-storage-record: false"
 mutant storage-record-true "$PUB" "create-storage-record: false" "create-storage-record: true" "lacks create-storage-record: false"
@@ -151,14 +189,51 @@ mutant target-trigger "$PUB" "on:
   workflow_dispatch:" "on:
   pull_request_target:
   workflow_dispatch:" "uses pull_request_target"
-mutant secret-ref "$PUB" "password: \${{ github.token }}" "password: \${{ secrets.EXAMPLE }}" "references secrets.*"
+mutant secret-ref "$PUB" "password: \${{ github.token }}" "password: \${{ secrets.EXAMPLE }}" "references secrets"
 mutant top-permissions "$PUB" "permissions:
   contents: read
 
-concurrency" "permissions:
+defaults" "permissions:
   contents: write
 
-concurrency" "top-level permissions must be exactly 'contents: read'"
+defaults" "top-level permissions must be exactly 'contents: read'"
+mutant secrets-index "$PUB" "password: \${{ github.token }}" "password: \${{ secrets['EXAMPLE'] }}" "references secrets"
+mutant no-pipefail "$PUB" "defaults:
+  run:
+    shell: bash
+" "" "lacks top-level 'defaults: run: shell: bash'"
+mutant ci-trigger .github/workflows/ci.yml "on:
+  pull_request:" "on:
+  workflow_run:
+    workflows: [x]
+  pull_request:" "ci.yml triggers must be exactly"
+mutant ci-job-permission .github/workflows/ci.yml "  test:
+    runs-on: ubuntu-24.04" "  test:
+    permissions:
+      packages: write
+    runs-on: ubuntu-24.04" "ci.yml has a job-level permissions block"
+mutant third-job "$PUB" "  scan:
+    needs: publish" "  extra:
+    runs-on: ubuntu-24.04
+    steps: []
+  scan:
+    needs: publish" "jobs must be exactly publish and scan"
+mutant scan-permission "$PUB" "      packages: read" "      packages: write" "job scan permissions must be exactly"
+mutant scan-blocking "$PUB" "    continue-on-error: true
+    permissions:" "    permissions:" "scan job must be 'needs: publish' with continue-on-error: true"
+mutant login-before-gate "$PUB" "      - name: Build
+        env:" "      - name: Log in to the registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+      - name: Build
+        env:" "must have exactly one step named 'Log in"
+mutant no-config-bind "$PUB" '"$pushed_config" != "$gated_config"' '"$pushed_config" != "$pushed_config"' "does not compare the pushed config digest with the gated one"
+mutant no-republish-guard "$PUB" "already published" "published before" "no refusal for an already published"
+mutant loose-media-type "$PUB" "application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json) ;;" "*image.manifest*) ;;" "must accept exactly the OCI and Docker v2 single-manifest media types"
+mutant attest-summary "$PUB" "show-summary: false" "show-summary: true" "lacks show-summary: false"
+mutant second-label Dockerfile 'USER guacd' 'LABEL other.key="v"
+USER guacd' "label keys must be exactly"
+mutant build-script-digest scripts/build-guacd-image 'set -euo pipefail' "set -euo pipefail
+# sha256:$(printf 'b%.0s' $(seq 64))" "scripts/build-guacd-image carries a literal digest"
 mutant no-main-guard "$PUB" "if: github.ref == 'refs/heads/main'" "if: always()" "no main-only condition"
 mutant literal-digest "$PUB" "run: scripts/build-guacd-image" "run: echo sha256:$(printf 'a%.0s' $(seq 64)) && scripts/build-guacd-image" "carries a literal digest"
 mutant bad-base BASE "guacamole/guacd@sha256:" "guacamole/guacd:" "BASE is not a guacamole/guacd@sha256:<64 hex> reference"
@@ -183,27 +258,64 @@ PRIV="$WORK/private-patterns"; echo "zzprivateword" > "$PRIV"
   && printf 'noreply 5+me@users.noreply.github.com\n' > ok.txt && git add -A && git commit -q -m "plant")
 out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H/scripts/check-public-hygiene" --repo "$H" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "the scanner exits 1 on planted findings" || bad "the scanner exits 1 on planted findings" "rc=$rc"
-for want in "file ip.txt: 1 match(es) of ipv4-address" "file mail.txt: 1 match(es) of non-noreply-email" \
-  "file home.txt: 1 match(es) of absolute-home-path" "file priv.txt: 1 match(es) of private-pattern-1" \
-  "file tz.txt: 1 match(es) of time-zone-label" "file rid.txt: 1 match(es) of review-id-shape"; do
+for want in "(ip.txt): 1 match(es) of ipv4-address" "(mail.txt): 1 match(es) of non-noreply-email" \
+  "(home.txt): 1 match(es) of absolute-home-path" "(priv.txt): 1 match(es) of private-pattern-1" \
+  "(tz.txt): 1 match(es) of time-zone-label" "(rid.txt): 1 match(es) of review-id-shape"; do
   [[ "$out" == *"$want"* ]] && ok "scanner reports: $want" || bad "scanner reports: $want" "$out"
 done
 [[ "$out" != *"zzprivateword"* && "$out" != *"someone@"* ]] && ok "the scanner never prints a matched value" || bad "the scanner never prints a matched value"
-[[ "$out" != *"file ok.txt"* ]] && ok "a noreply address is allowed" || bad "a noreply address is allowed"
+[[ "$out" != *"(ok.txt)"* ]] && ok "a noreply address is allowed" || bad "a noreply address is allowed"
 out="$(cd "$H" && git commit -q --allow-empty -m "$(printf 'fix %s %s-%s' "$(printf 'r%s' 7)" C 1)" && "$H/scripts/check-public-hygiene" --repo "$H" 2>&1)"
 [[ "$out" == *"commit "*"match(es) of review-id-shape"* ]] && ok "the scanner reads commit messages" || bad "the scanner reads commit messages" "$out"
 out="$(printf 'contact someone\100example.com\n' | "$HYG" --stdin 2>&1)"; rc=$?
 [[ $rc -eq 1 && "$out" == *"stdin: 1 match(es) of non-noreply-email"* ]] && ok "the scanner reads stdin" || bad "the scanner reads stdin" "$out"
-expect_pass "the real repo passes the generic scan" "hygiene: clean (0 findings)" "$HYG" --repo "$ROOT"
+# history and metadata cases
+mkrepo() { # mkrepo <dir>: a fresh repo with the scanner, noreply identity, one clean commit
+  mkdir -p "$1/scripts" && cp "$ROOT/scripts/deny-patterns" "$ROOT/scripts/check-public-hygiene" "$1/scripts/"
+  (cd "$1" && git init -q -b main && git config user.name t && git config user.email "1+t@users.noreply.github.com" \
+    && echo "clean text" > a.txt && git add -A && git commit -q -m "generic message")
+}
+H2="$WORK/hist"; mkrepo "$H2"
+(cd "$H2" && echo "zzprivateword" > leak.txt && git add -A && git commit -q -m "add" && git rm -q leak.txt && git commit -q -m "remove")
+out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H2/scripts/check-public-hygiene" --repo "$H2" 2>&1)"; rc=$?
+[[ $rc -eq 1 && "$out" == *"hygiene: FAIL: blob "*"(leak.txt): 1 match(es) of private-pattern-1"* ]] && ok "a value added in one commit and removed in the next is still found (blob)" || bad "history blob scan" "rc=$rc $out"
+H3="$WORK/histpath"; mkrepo "$H3"
+(cd "$H3" && echo ok > zzprivateword.txt && git add -A && git commit -q -m "add" && git rm -q zzprivateword.txt && git commit -q -m "remove")
+out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H3/scripts/check-public-hygiene" --repo "$H3" 2>&1)"; rc=$?
+[[ $rc -eq 1 && "$out" == *"hygiene: FAIL: path zzprivateword.txt: 1 match(es) of private-pattern-1"* ]] && ok "a file name that existed only in an earlier commit is found" || bad "historical file name" "rc=$rc $out"
+H4="$WORK/dirty"; mkrepo "$H4"; echo more >> "$H4/a.txt"
+out="$("$H4/scripts/check-public-hygiene" --repo "$H4" 2>&1)"; rc=$?
+[[ $rc -eq 2 && "$out" == *"working tree is dirty; commit or stash before the pre-push scan"* ]] && ok "a dirty working tree is refused (exit 2)" || bad "dirty tree" "rc=$rc $out"
+H5="$WORK/hidden"; mkrepo "$H5"
+(cd "$H5" && echo "zzprivateword" > leak.txt && git add -A && git commit -q -m "add" && echo clean > leak.txt)
+out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H5/scripts/check-public-hygiene" --repo "$H5" 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && ok "a committed value hidden by a working-tree edit cannot pass (dirty refused)" || bad "hidden edit" "rc=$rc"
+H6="$WORK/email"; mkrepo "$H6"
+(cd "$H6" && GIT_COMMITTER_NAME=GitHub GIT_COMMITTER_EMAIL=noreply@github.com git commit -q --allow-empty -m "web merge")
+expect_pass "GitHub's own committer address (noreply@github.com) is allowed" "hygiene: clean (0 findings)" "$H6/scripts/check-public-hygiene" --repo "$H6"
+(cd "$H6" && GIT_COMMITTER_NAME=Other GIT_COMMITTER_EMAIL="$(printf 'someone\100github.com')" git commit -q --allow-empty -m "other")
+expect_fail "any other github.com address still fails" "match(es) of non-noreply-email" "$H6/scripts/check-public-hygiene" --repo "$H6"
+H7="$WORK/patfile"; mkrepo "$H7"
+(cd "$H7" && printf 'x\tzzprivateword\n' >> scripts/deny-patterns && git add -A && git commit -q -m "edit patterns")
+out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H7/scripts/check-public-hygiene" --repo "$H7" 2>&1)"; rc=$?
+[[ $rc -eq 1 && "$out" == *"(scripts/deny-patterns): 1 match(es) of private-pattern-1"* ]] && ok "the pattern file is NOT exempt from the private patterns" || bad "pattern file private" "rc=$rc $out"
+(cd "$H7" && git reset -q --hard HEAD~1 && printf 'x\t%s.%s.%s.%s\n' 10 0 0 1 >> scripts/deny-patterns && git add -A && git commit -q -m "edit patterns again")
+expect_pass "the pattern file is exempt from the generic patterns" "hygiene: clean (0 findings)" "$H7/scripts/check-public-hygiene" --repo "$H7"
+H8="$WORK/bin"; mkrepo "$H8"
+(cd "$H8" && printf 'zzprivateword\000\001' > blob.bin && git add -A && git commit -q -m "binary")
+out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H8/scripts/check-public-hygiene" --repo "$H8" 2>&1)"; rc=$?
+[[ $rc -eq 1 && "$out" == *"(blob.bin): 1 match(es) of private-pattern-1"* && "$out" == *"(1 binary blob(s) included)"* ]] && ok "a binary blob is scanned and counted" || bad "binary blob" "rc=$rc $out"
+# the real repo: scan a clone of its committed state (a dirty working tree must not matter for the test)
+git clone -q --no-local "$ROOT" "$WORK/realclone" 2>/dev/null || git clone -q "$ROOT" "$WORK/realclone"
+expect_pass "the real repo (committed state) passes the generic scan" "hygiene: clean (0 findings)" "$WORK/realclone/scripts/check-public-hygiene" --repo "$WORK/realclone"
 
 echo "== workflow files carry the (p) label rule"
 # (p) below relies on a base-name LABEL in its Dockerfile; asserted here so a label rename cannot silently move (p)'s failure point.
-P_LABEL='LABEL org.opencontainers.image.base.name='
-grep -q "$P_LABEL" "$ROOT/tests/guacd-image-gate-test.sh" && ok "(p) Dockerfile sets the base-name LABEL" || bad "(p) Dockerfile sets the base-name LABEL"
+# (asserted on the generated Dockerfile text in the real-image section below, where it is written)
 
 echo "== real-image cases (need Docker and one base pull)"
 if [[ $DOCKER -eq 0 ]]; then
-  skipped=3; echo "SKIPPED: (a), (b), (p) (--no-docker)"
+  skipped=4; echo "SKIPPED: (a), (b), (p) and the (p) label assertion (--no-docker)"
 else
   BASE="$(tr -d '[:space:]' < "$ROOT/BASE")"
   export PLATFORM="${PLATFORM:-linux/amd64}"
@@ -218,7 +330,10 @@ else
   echo x > "$CTX/files/usr/share/zoneinfo/UTC"; echo tzdata > "$CTX/files/etc/apk/world"
   for f in installed scripts.tar triggers; do echo x > "$CTX/files/lib/apk/db/$f"; done
   chmod -R go-w "$CTX/files"; find "$CTX/files" -type d -exec chmod 755 {} +; find "$CTX/files" -type f -exec chmod 644 {} +
-  printf 'FROM %s\nLABEL org.opencontainers.image.base.name=%s\nCOPY --chown=0:0 files/ /\n' "$BASE" "$BASE" > "$CTX/Dockerfile"
+  P_DOCKERFILE="$(printf 'FROM %s\nLABEL org.opencontainers.image.base.name=%s\nCOPY --chown=0:0 files/ /\n' "$BASE" "$BASE")"
+  [[ "$P_DOCKERFILE" == *$'\nLABEL org.opencontainers.image.base.name='"$BASE"$'\n'* ]] \
+    && ok "(p) Dockerfile sets the base-name LABEL (asserted on the generated text)" || bad "(p) Dockerfile sets the base-name LABEL"
+  printf '%s\n' "$P_DOCKERFILE" > "$CTX/Dockerfile"
   docker buildx build --platform "$PLATFORM" --provenance=false --sbom=false --load -q -t "gtz-test-p:$$" "$CTX" >/dev/null 2>&1; TAGS="$TAGS gtz-test-p:$$"
   out="$("$GATE" "gtz-test-p:$$" "$BASE" 2>&1)"; rc=$?
   if [[ $rc -ne 0 && "$out" == *"ok: parent proof"* && "$out" == *"ok: layer content check"* && "$out" == *"ok: config checks"* && "$out" == *"FAIL: zoneinfo: Asia/Karachi missing"* ]]; then

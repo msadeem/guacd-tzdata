@@ -8,7 +8,8 @@ image plus the Alpine `tzdata` package.
 The upstream guacd image ships no time-zone database (no `/usr/share/zoneinfo`),
 so a requested time zone cannot be applied and every session runs as UTC. This
 image adds exactly one layer on top of a pinned upstream image: the `tzdata`
-package. Nothing else changes (same user, same entrypoint). When upstream ships a
+package. Nothing else changes in behaviour (same user, same entrypoint); apart from
+the zone files, the layer only updates apk's own package records. When upstream ships a
 time-zone database, this image is no longer needed.
 
 ## What is in the repository
@@ -25,7 +26,8 @@ time-zone database, this image is no longer needed.
   must not appear in a public repository.
 - `.github/workflows/ci.yml`: tests, then a build and gate run. It never pushes.
 - `.github/workflows/publish.yml`: manual only, `main` only. Builds, runs the gate,
-  pushes `ghcr.io/<owner>/guacd-tzdata:sha-<commit>` and attests the digest.
+  pushes `ghcr.io/<owner>/guacd-tzdata:sha-<commit>` (never twice for one commit) and
+  attests the digest. A second, read-only job then runs a report-only vulnerability scan.
 
 ## Using the image
 
