@@ -2,8 +2,9 @@
 # the base image. The gate (scripts/guacd-image-gate, stage 2) reads this file;
 # nothing is ever read from the image under test.
 #
-# Measured once, from a clean `scripts/build-guacd-image` build of BASE
-# (native linux/amd64, no emulation). Command, run on the saved image:
+# Measured from clean `scripts/build-guacd-image` builds of BASE (native linux/amd64,
+# no emulation, on both the containerd and the classic overlay2 image store).
+# Command, run on the saved image:
 #   docker save --platform linux/amd64 <image> | tar -xO <last layer blob> \
 #     | tar -t   (then every path outside usr/share/zoneinfo/, with sha256sum
 #     of each regular file outside the tree)
@@ -26,11 +27,13 @@ bookkeeping lib/apk/db/installed
 bookkeeping lib/apk/db/scripts.tar
 bookkeeping lib/apk/db/triggers
 bookkeeping etc/apk/world
-# apk's lock file: left behind by the builder on some hosts, always empty
+# apk's lock file: the base ships it empty; the classic overlay2 store copies it into the
+# layer when apk opens it. The gate enforces size 0.
 bookkeeping lib/apk/db/lock size=0
 
 # tzdata extras outside usr/share/zoneinfo/: NONE. Measured on a clean native linux/amd64
 # build of the pinned BASE with tzdata 2025b-r0: the added layer holds 1243 entries under
-# usr/share/zoneinfo/ and 11 others (the four bookkeeping files above and their parent
+# usr/share/zoneinfo/ and 11 others on the containerd store, 12 on the classic overlay2
+# store (the bookkeeping files above, the lock only on overlay2, and their parent
 # directories: etc, etc/apk, lib, lib/apk, lib/apk/db, usr, usr/share). A build under
 # emulation that leaves other paths (for example a cache directory) is correctly refused.
