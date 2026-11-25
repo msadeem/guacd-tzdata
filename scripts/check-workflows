@@ -46,6 +46,19 @@ def block(lines, header_re, indent):
     return out
 
 
+def jobs_of(lines):
+    """{job name: [lines]} for the jobs under the top-level `jobs:` key (jobs are keys at indent 2)."""
+    out, cur = {}, None
+    for ln in block(lines, r"jobs:", 0):
+        m = re.match(r"^ {2}([A-Za-z0-9_-]+):\s*$", ln)
+        if m:
+            cur = m.group(1)
+            out[cur] = []
+        elif cur is not None:
+            out[cur].append(ln)
+    return out
+
+
 wfs = sorted(glob.glob(os.path.join(root, ".github/workflows/*.yml")))
 if not wfs:
     err("no workflow files found")
@@ -64,11 +77,22 @@ for wf in wfs:
     for t in ("schedule", "workflow_call"):
         if re.search(r"^\s{0,2}%s\s*:" % t, text, re.M):
             err("%s uses the %s trigger" % (rel, t))
-    if re.search(r"\bsecrets\.", text):
-        err("%s references secrets.* (only the automatic github.token may be used)" % rel)
+    if re.search(r"\bsecrets\b", text):
+        err("%s references secrets (only the automatic github.token may be used)" % rel)
+    if not re.search(r"^defaults:\n  run:\n    shell: bash$", text, re.M):
+        err("%s lacks top-level 'defaults: run: shell: bash' (pipefail)" % rel)
     top = [l.strip() for l in block(lines, r"permissions:", 0)]
     if top != ["contents: read"]:
         err("%s top-level permissions must be exactly 'contents: read', found %s" % (rel, top))
+
+ci = read(".github/workflows/ci.yml")
+if ci:
+    cl = ci.splitlines()
+    ctrig = [l.strip() for l in block(cl, r"on:", 0)]
+    if ctrig != ["pull_request:", "push:", "branches: [main]"]:
+        err("ci.yml triggers must be exactly pull_request and push on main, found %s" % ctrig)
+    if re.search(r"^ {4}permissions:", ci, re.M):
+        err("ci.yml has a job-level permissions block (jobs must inherit contents: read)")
 
 pub = read(".github/workflows/publish.yml")
 if pub:
@@ -76,20 +100,55 @@ if pub:
     trig = [l.strip() for l in block(lines, r"on:", 0)]
     if trig != ["workflow_dispatch:"]:
         err("publish.yml triggers must be exactly workflow_dispatch, found %s" % trig)
-    jobperm = sorted(l.strip() for l in block(lines, r"permissions:", 4))
+    jobs = jobs_of(lines)
+    if sorted(jobs) != ["publish", "scan"]:
+        err("publish.yml jobs must be exactly publish and scan, found %s" % sorted(jobs))
     want = sorted(["contents: read", "packages: write", "id-token: write", "attestations: write"])
-    if jobperm != want:
-        err("publish.yml job permissions must be exactly %s, found %s" % (want, jobperm))
+    for name, wantset in (("publish", want), ("scan", sorted(["contents: read", "packages: read"]))):
+        jl = jobs.get(name, [])
+        got = sorted(l.strip() for l in block(jl, r"permissions:", 4))
+        if got != wantset:
+            err("publish.yml job %s permissions must be exactly %s, found %s" % (name, wantset, got))
+        if sum(1 for l in jl if re.match(r"^ {4}permissions:", l)) != 1:
+            err("publish.yml job %s must have exactly one permissions block" % name)
+    scan = "\n".join(jobs.get("scan", []))
+    if not re.search(r"^ {4}continue-on-error: true$", scan, re.M) or not re.search(r"^ {4}needs: publish$", scan, re.M):
+        err("publish.yml scan job must be 'needs: publish' with continue-on-error: true")
+    if "id-token" in scan or "actions/attest" in scan:
+        err("publish.yml scan job must not hold id-token or attest")
     if "artifact-metadata" in pub:
         err("publish.yml mentions artifact-metadata (it must be absent)")
     if "if: github.ref == 'refs/heads/main'" not in pub:
         err("publish.yml job has no main-only condition")
     if 'GITHUB_REF" != "refs/heads/main"' not in pub:
         err("publish.yml has no refuse-anything-but-main guard step")
-    if "persist-credentials: false" not in pub:
-        err("publish.yml checkout lacks persist-credentials: false")
     if not re.search(r"^\s*concurrency:", pub, re.M):
         err("publish.yml has no concurrency group")
+    if pub.count("persist-credentials: false") != pub.count("actions/checkout@"):
+        err("publish.yml checkout lacks persist-credentials: false")
+    # step order inside the publish job: no credential before the gate, push bound to the gate
+    pl = jobs.get("publish", [])
+    names = [m.group(1) for l in pl for m in [re.match(r"^\s{6}- name: (.*)$", l)] if m]
+    order = ["Build", "Gate", "Log in", "Refuse a re-publish", "Push", "Attest", "Summary"]
+    pos = []
+    for o in order:
+        hit = [i for i, n in enumerate(names) if n.startswith(o)]
+        if len(hit) != 1:
+            err("publish.yml publish job must have exactly one step named '%s...'" % o)
+        else:
+            pos.append(hit[0])
+    if len(pos) == len(order) and pos != sorted(pos):
+        err("publish.yml publish job steps are out of order (build, gate, login, re-publish check, push, attest, summary)")
+    ptext = "\n".join(pl)
+    if "GATED_CONFIG_DIGEST_FILE" not in ptext or ptext.count("GATED_CONFIG_DIGEST_FILE") < 2:
+        err("publish.yml gate and push steps must share GATED_CONFIG_DIGEST_FILE")
+    if '"$pushed_config" != "$gated_config"' not in ptext:
+        err("publish.yml push step does not compare the pushed config digest with the gated one")
+    if "already published" not in ptext:
+        err("publish.yml has no refusal for an already published sha-<commit> tag")
+    if "image.manifest*" in ptext or "application/vnd.oci.image.manifest.v1+json" not in ptext \
+            or "application/vnd.docker.distribution.manifest.v2+json" not in ptext:
+        err("publish.yml must accept exactly the OCI and Docker v2 single-manifest media types")
     # the attest step and its inputs
     idx = [i for i, l in enumerate(lines) if re.match(r"^\s*-?\s*uses:\s*actions/attest@", l)]
     if len(idx) != 1:
@@ -98,13 +157,12 @@ if pub:
         i = idx[0]
         step = []
         for l in lines[i + 1:]:
-            if re.match(r"^\s{6}- ", l):
+            if re.match(r"^\s{6}- ", l) or re.match(r"^  [a-z]", l):
                 break
             step.append(l.strip())
-        if "push-to-registry: true" not in step:
-            err("the actions/attest step lacks push-to-registry: true")
-        if "create-storage-record: false" not in step:
-            err("the actions/attest step lacks create-storage-record: false")
+        for need in ("push-to-registry: true", "create-storage-record: false", "show-summary: false"):
+            if need not in step:
+                err("the actions/attest step lacks %s" % need)
 
 base = read("BASE").strip()
 if not re.match(r"^guacamole/guacd@sha256:[0-9a-f]{64}$", base):
@@ -125,11 +183,11 @@ if df:
         err("Dockerfile sets a TZ environment variable")
     if not re.search(r"^FROM \$\{BASE\}\s*$", df, re.M):
         err("Dockerfile has no plain 'FROM ${BASE}' final stage")
-    m = re.search(r"^LABEL\s+((?:.*\\\n)*.*)$", df, re.M)
-    if not m:
+    labels = re.findall(r"^LABEL\s+((?:.*\\\n)*.*)$", df, re.M)
+    if not labels:
         err("Dockerfile has no LABEL instruction")
     else:
-        body = m.group(1).replace("\\\n", " ")
+        body = " ".join(x.replace("\\\n", " ") for x in labels)
         pairs = re.findall(r'([A-Za-z0-9_.-]+)="([^"]*)"', body)
         keys = sorted(k for k, _ in pairs)
         wantk = sorted([

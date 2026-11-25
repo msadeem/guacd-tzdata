@@ -7,11 +7,17 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: publish-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
+  # The only job that can write: it builds, gates, pushes and attests, and runs no
+  # third-party code that downloads anything at run time.
   publish:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -21,6 +27,8 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     env:
       IMAGE: ghcr.io/${{ github.repository }}
     steps:
@@ -39,13 +47,6 @@ jobs:
       - name: Set up buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Log in to the registry
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
       - name: Build
         env:
           REVISION: ${{ github.sha }}
@@ -53,17 +54,29 @@ jobs:
         run: scripts/build-guacd-image "$IMAGE:sha-$GITHUB_SHA"
 
       - name: Gate (stages 1 to 4, before any push)
+        env:
+          GATED_CONFIG_DIGEST_FILE: ${{ runner.temp }}/gated-config-digest
         run: scripts/guacd-image-gate "$IMAGE:sha-$GITHUB_SHA" "$(cat BASE)"
 
-      - name: Vulnerability scan (report only)
-        uses: anchore/scan-action@11983a512817154c80a9db660c1a184be7513ed6 # v7.4.3
+      # The registry credential is written only now, after the build and the gate.
+      - name: Log in to the registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
-          image: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
-          fail-build: false
-          output-format: table
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
-      - name: Push
+      - name: Refuse a re-publish of the same commit
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" >/dev/null 2>&1; then
+            echo "tag sha-$GITHUB_SHA already published; a re-publish needs a new commit" >&2
+            exit 1
+          fi
+
+      - name: Push and bind the pushed image to the gated one
         id: push
+        env:
+          GATED_CONFIG_DIGEST_FILE: ${{ runner.temp }}/gated-config-digest
         run: |
           docker push "$IMAGE:sha-$GITHUB_SHA"
           digest="$(docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" --format '{{.Manifest.Digest}}')"
@@ -71,31 +84,72 @@ jobs:
             echo "unexpected digest: $digest" >&2
             exit 1
           fi
-          media="$(docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" --raw | jq -r .mediaType)"
+          raw="$(docker buildx imagetools inspect "$IMAGE@$digest" --raw)"
+          media="$(printf '%s' "$raw" | jq -r .mediaType)"
           case "$media" in
-            *image.manifest*) ;;
+            application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json) ;;
             *) echo "the pushed digest is not a single image manifest: $media" >&2; exit 1 ;;
           esac
+          pushed_config="$(printf '%s' "$raw" | jq -r .config.digest)"
+          gated_config="$(cat "$GATED_CONFIG_DIGEST_FILE")"
+          if [ -z "$gated_config" ] || [ "$pushed_config" != "$gated_config" ]; then
+            echo "the pushed config digest ($pushed_config) is not the gated one ($gated_config)" >&2
+            exit 1
+          fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance
+        id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
+          show-summary: false
 
       - name: Summary
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
+          ATTEST_URL: ${{ steps.attest.outputs.attestation-url }}
         run: |
+          tz="$(docker run --rm --platform linux/amd64 --entrypoint sh "$IMAGE:sha-$GITHUB_SHA" -c 'apk info -e -v tzdata')"
+          case "$tz" in tzdata-*) ;; *) echo "unexpected tzdata version: $tz" >&2; exit 1 ;; esac
+          base="$(cat BASE)"
           {
             echo "## Published image"
             echo
             echo "- image: \`$IMAGE@$DIGEST\`"
-            echo "- base: \`$(cat BASE)\`"
-            echo "- tzdata: \`$(docker run --rm --platform linux/amd64 --entrypoint sh "$IMAGE:sha-$GITHUB_SHA" -c 'apk info -e -v tzdata')\`"
+            echo "- base: \`$base\`"
+            echo "- tzdata: \`$tz\`"
             echo "- commit: \`$GITHUB_SHA\`"
             echo "- run: \`$GITHUB_RUN_ID\`"
+            echo "- attestation: $ATTEST_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Report only. It runs third-party code that downloads its scanner and database at run
+  # time, so it gets a read-only token, no write permission and no OIDC, and it can never
+  # change what was published or block it.
+  scan:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Log in to the registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Vulnerability scan (report only)
+        continue-on-error: true
+        uses: anchore/scan-action@11983a512817154c80a9db660c1a184be7513ed6 # v7.4.3
+        with:
+          image: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.digest }}
+          fail-build: false
+          output-format: table
