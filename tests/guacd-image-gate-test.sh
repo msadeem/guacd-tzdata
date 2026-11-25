@@ -151,7 +151,7 @@ json.dump({"config": {"User": "guacd", "Entrypoint": ["/opt/guacamole/entrypoint
 PY
 }
 cfgx "$WORK/c-extra-label.json" "com.example.other" '["PATH=/usr/bin"]'
-cfgx "$WORK/c-env-tz.json" "" '["PATH=/usr/bin","TZ=Asia/Karachi"]'
+cfgx "$WORK/c-env-tz.json" "" '["PATH=/usr/bin","TZ=Asia/Tokyo"]'
 cfgx "$WORK/c-clean-x.json" "guacd-tzdata.tzdata-version" '[]'
 cfgk() { # cfgk <file> <json of extra Config keys>
   python3 - "$1" "$2" "$BASE_REF" <<'PY'
@@ -281,7 +281,7 @@ mutant lowercase-label Dockerfile 'USER guacd' 'label com.other.x="y"
 USER guacd' "Dockerfile instructions must be upper-case at column 0: label"
 mutant indented-label Dockerfile 'USER guacd' '  LABEL com.other.x="y"
 USER guacd' "Dockerfile instructions must be upper-case at column 0:"
-mutant lowercase-env-tz Dockerfile 'USER guacd' 'env TZ=Asia/Karachi
+mutant lowercase-env-tz Dockerfile 'USER guacd' 'env TZ=Asia/Tokyo
 USER guacd' "Dockerfile instructions must be upper-case at column 0: env"
 mutant unquoted-label Dockerfile 'USER guacd' 'LABEL com.other.x=y
 USER guacd' "label com.other.x must be key=\"value\" (quoted)"
@@ -295,7 +295,7 @@ mutant bad-base BASE "guacamole/guacd@sha256:" "guacamole/guacd:" "BASE is not a
 mutant label-namespace Dockerfile 'guacd-tzdata.workflow-run-id="${RUN_ID}"' 'guacd-tzdata.workflow-run-id="${RUN_ID}" com.example.x="y"' "label keys must be exactly"
 mutant label-missing Dockerfile 'guacd-tzdata.workflow-run-id="${RUN_ID}"' 'guacd-tzdata.x="${RUN_ID}"' "label keys must be exactly"
 mutant label-subst Dockerfile 'org.opencontainers.image.created="${CREATED}"' 'org.opencontainers.image.created="$(date)"' "neither a literal nor a plain build arg"
-mutant tz-env Dockerfile "USER root" "ENV TZ=Asia/Karachi
+mutant tz-env Dockerfile "USER root" "ENV TZ=Asia/Tokyo
 USER root" "sets a TZ environment variable"
 mutant user-root Dockerfile "USER guacd" "USER root" "does not end as USER guacd"
 
@@ -346,7 +346,7 @@ PH="$(printf 'zzprivateword.txt' | python3 -c 'import hashlib,sys;print(hashlib.
 [[ "$out" != *"zzprivateword"* ]] && ok "the private word never appears in the scanner output (path match)" || bad "private word printed for a path match"
 H9="$WORK/dates"; mkrepo "$H9"
 expect_pass "UTC commit dates pass the date rule" "hygiene: clean (0 findings)" "$H9/scripts/check-public-hygiene" --repo "$H9"
-(cd "$H9" && GIT_AUTHOR_DATE="2026-01-01T10:00:00+0500" git commit -q --allow-empty -m "local author date")
+(cd "$H9" && GIT_AUTHOR_DATE="2026-01-01T10:00:00+0900" git commit -q --allow-empty -m "local author date")
 out="$("$H9/scripts/check-public-hygiene" --repo "$H9" 2>&1)"; rc=$?
 [[ $rc -eq 1 && "$out" == *"author date: 1 match(es) of non-utc-date"* ]] && ok "a non-UTC author date is refused" || bad "non-UTC author date" "rc=$rc $out"
 (cd "$H9" && git reset -q --hard HEAD~1 && GIT_COMMITTER_DATE="2026-01-01T10:00:00-0300" git commit -q --allow-empty -m "local committer date")
@@ -413,8 +413,8 @@ else
   printf '%s\n' "$P_DOCKERFILE" > "$CTX/Dockerfile"
   docker buildx build --platform "$PLATFORM" --provenance=false --sbom=false --load -q -t "gtz-test-p:$$" "$CTX" >/dev/null 2>&1; TAGS="$TAGS gtz-test-p:$$"
   out="$("$GATE" "gtz-test-p:$$" "$BASE" 2>&1)"; rc=$?
-  if [[ $rc -ne 0 && "$out" == *"ok: parent proof"* && "$out" == *"ok: layer content check"* && "$out" == *"ok: config checks"* && "$out" == *"FAIL: zoneinfo: Asia/Karachi missing"* ]]; then
-    ok "(p) clean layer passes stages 1-3, then fails at 'zoneinfo: Asia/Karachi missing'"
+  if [[ $rc -ne 0 && "$out" == *"ok: parent proof"* && "$out" == *"ok: layer content check"* && "$out" == *"ok: config checks"* && "$out" == *"FAIL: zoneinfo: Asia/Tokyo missing"* ]]; then
+    ok "(p) clean layer passes stages 1-3, then fails at 'zoneinfo: Asia/Tokyo missing'"
   else bad "(p) clean layer passes stages 1-3, then fails at the first runtime check" "rc=$rc $out"; fi
 fi
 

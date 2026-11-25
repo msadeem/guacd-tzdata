@@ -52,9 +52,9 @@ def zones():
     add("usr/share/zoneinfo/UTC", data=b"utc")
     add("usr/share/zoneinfo/Asia", "dir", 0o755)
     add("usr/share/zoneinfo/Asia/Kolkata", data=b"k")
-    add("usr/share/zoneinfo/Asia/Karachi", data=b"karachi")
+    add("usr/share/zoneinfo/Asia/Tokyo", data=b"tokyo")
     add("usr/share/zoneinfo/Asia/Calcutta", "hard", link="usr/share/zoneinfo/Asia/Kolkata")
-    add("usr/share/zoneinfo/Asia/Link", "sym", 0o777, link="Karachi")
+    add("usr/share/zoneinfo/Asia/Link", "sym", 0o777, link="Tokyo")
     add("usr/share/zoneinfo/Asia/Zulu", "sym", 0o777, link="../UTC")
     add("usr/share/zoneinfo/Abs", "sym", 0o777, link="/usr/share/zoneinfo/UTC")
 

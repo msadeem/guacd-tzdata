@@ -96,18 +96,20 @@ stage python3 -I "$HELPER" config "$WORK/image-inspect.json" "$BASE_REF" "$WORK/
 
 # 4. runtime
 run() { docker run --rm --platform "$PLATFORM" --entrypoint sh "$IMAGE" -c "$1" 2>&1; }
-for z in UTC Asia/Karachi; do
+for z in UTC Asia/Tokyo America/Sao_Paulo; do
   run "test -f /usr/share/zoneinfo/$z" >/dev/null || die "zoneinfo: $z missing"
 done
-off="$(run 'TZ=Asia/Karachi date +%z')"
-[[ "$off" == "+0500" ]] || die "runtime: TZ=Asia/Karachi date +%z printed '$off', expected +0500"
+for zo in Asia/Tokyo:+0900 America/Sao_Paulo:-0300; do
+  off="$(run "TZ=${zo%%:*} date +%z")"
+  [[ "$off" == "${zo##*:}" ]] || die "runtime: TZ=${zo%%:*} date +%z printed '$off', expected ${zo##*:}"
+done
 usr="$(run 'id -un')"
 [[ "$usr" == "guacd" ]] || die "runtime: the container user is '$usr', expected guacd"
 inst="$(run 'apk info -e -v tzdata')"
 label="$(docker image inspect --platform "$PLATFORM" --format '{{index .Config.Labels "guacd-tzdata.tzdata-version"}}' "$IMAGE" 2>/dev/null \
   || docker image inspect --format '{{index .Config.Labels "guacd-tzdata.tzdata-version"}}' "$IMAGE")"
 [[ -n "$inst" && "$label" == "$inst" ]] || die "runtime: label guacd-tzdata.tzdata-version is '$label' but apk reports '$inst'"
-echo "ok: runtime checks (zoneinfo, +0500, user guacd, $inst)"
+echo "ok: runtime checks (zoneinfo, +0900 and -0300, user guacd, $inst)"
 if [[ -n "${GATED_CONFIG_DIGEST_FILE:-}" ]]; then
   cp "$WORK/image/config-digest" "$GATED_CONFIG_DIGEST_FILE" || die "cannot write the gated config digest"
 fi
