@@ -11,7 +11,7 @@
 # Syntax (one entry per line):
 #   zoneinfo <dir>            tree: regular files without setuid/setgid/exec bits,
 #                             directories, and links whose name AND target are inside
-#   bookkeeping <path>        the apk files one `apk add` writes; must exist only as
+#   bookkeeping <path> [size=0]  the apk files one `apk add` writes; must exist only as
 #                             regular, non-executable files; contents are NOT trusted
 #   extra <path> <sha256>     any other tzdata file outside the tree, pinned by content
 # Parent directories of the paths below are allowed only if their mode, uid and gid
@@ -26,6 +26,8 @@ bookkeeping lib/apk/db/installed
 bookkeeping lib/apk/db/scripts.tar
 bookkeeping lib/apk/db/triggers
 bookkeeping etc/apk/world
+# apk's lock file: left behind by the builder on some hosts, always empty
+bookkeeping lib/apk/db/lock size=0
 
 # tzdata extras outside usr/share/zoneinfo/: NONE. Measured on a clean native linux/amd64
 # build of the pinned BASE with tzdata 2025b-r0: the added layer holds 1243 entries under
