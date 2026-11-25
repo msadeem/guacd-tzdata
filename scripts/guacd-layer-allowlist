@@ -1,0 +1,34 @@
+# Allowlist for the single layer that `apk add --no-cache tzdata` adds on top of
+# the base image. The gate (scripts/guacd-image-gate, stage 2) reads this file;
+# nothing is ever read from the image under test.
+#
+# Measured once, from a clean `scripts/build-guacd-image` build of BASE
+# (native linux/amd64, no emulation). Command, run on the saved image:
+#   docker save --platform linux/amd64 <image> | tar -xO <last layer blob> \
+#     | tar -t   (then every path outside usr/share/zoneinfo/, with sha256sum
+#     of each regular file outside the tree)
+#
+# Syntax (one entry per line):
+#   zoneinfo <dir>            tree: regular files without setuid/setgid/exec bits,
+#                             directories, and links whose name AND target are inside
+#   bookkeeping <path>        the apk files one `apk add` writes; must exist only as
+#                             regular, non-executable files; contents are NOT trusted
+#   extra <path> <sha256>     any other tzdata file outside the tree, pinned by content
+# Parent directories of the paths below are allowed only if their mode, uid and gid
+# equal the base image's. Whiteouts and any other path are refused.
+#
+# Fail-closed rule: if a new tzdata ships a file outside the tree, the gate fails
+# and names it. Re-measure with the command above and review the diff here.
+
+zoneinfo usr/share/zoneinfo
+
+bookkeeping lib/apk/db/installed
+bookkeeping lib/apk/db/scripts.tar
+bookkeeping lib/apk/db/triggers
+bookkeeping etc/apk/world
+
+# tzdata extras outside usr/share/zoneinfo/: NONE. Measured on a clean native linux/amd64
+# build of the pinned BASE with tzdata 2025b-r0: the added layer holds 1243 entries under
+# usr/share/zoneinfo/ and 11 others (the four bookkeeping files above and their parent
+# directories: etc, etc/apk, lib, lib/apk, lib/apk/db, usr, usr/share). A build under
+# emulation that leaves other paths (for example a cache directory) is correctly refused.

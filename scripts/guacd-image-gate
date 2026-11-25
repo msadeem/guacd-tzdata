@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+#
+# guacd-image-gate -- prove what is INSIDE the guacd image before it is published.
+#
+#   scripts/guacd-image-gate <image-ref> <base-ref>
+#   scripts/guacd-image-gate --check-layer <added-layer.tar> <base-parents.tsv>
+#   scripts/guacd-image-gate --check-config <image-config.json> <base-ref> <base-config.json>
+#
+# A successful build proves nothing about the content of the result, so this
+# reads the artifact. Every check is fatal and the gate stops at the first
+# failure, so the ORDER is part of the contract: structural first, runtime last.
+#
+#   1. Parent proof   the image's layers are exactly the base's layers plus ONE
+#   2. Layer content  the added layer holds only what scripts/guacd-layer-allowlist
+#                     names (the allowlist is committed; nothing is read from
+#                     the image under test, because an image can forge that)
+#   3. Config checks  user, entrypoint and the base label (static, no container)
+#   4. Runtime checks zoneinfo present, the offset applies, user, version label
+#
+# --check-layer runs stage 2 alone and --check-config runs stage 3 alone. They
+# exist so the test suite (tests/guacd-image-gate-test.sh) can drive those
+# stages with hand-made inputs, without Docker. Stages 1 and 4 need a real image.
+#
+# Environment: PLATFORM (default linux/amd64), GUACD_LAYER_ALLOWLIST (default
+# scripts/guacd-layer-allowlist).
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPER="$HERE/guacd-gate-helper.py"
+ALLOWLIST="${GUACD_LAYER_ALLOWLIST:-$HERE/guacd-layer-allowlist}"
+PLATFORM="${PLATFORM:-linux/amd64}"
+ARCH="${PLATFORM#*/}"
+
+die() { echo "FAIL: $1"; exit 1; }
+stage() { # stage <helper args...>: run a helper subcommand, relay its one line
+  local out
+  if ! out="$("$@" 2>&1)"; then
+    echo "FAIL: $out"
+    exit 1
+  fi
+  echo "$out"
+}
+
+usage() {
+  echo "usage: $0 <image-ref> <base-ref> | --check-layer <layer.tar> <base-parents.tsv> | --check-config <config.json> <base-ref> <base-config.json>" >&2
+  exit 2
+}
+
+case "${1:-}" in
+  --check-layer)
+    [[ $# -eq 3 ]] || usage
+    stage python3 -I "$HELPER" layer "$2" "$3" "$ALLOWLIST"
+    exit 0
+    ;;
+  --check-config)
+    [[ $# -eq 4 ]] || usage
+    stage python3 -I "$HELPER" config "$2" "$3" "$4"
+    exit 0
+    ;;
+  "" | -*) usage ;;
+esac
+
+IMAGE="$1"
+BASE_REF="${2:-}"
+[[ -n "$BASE_REF" ]] || usage
+if [[ ! "$BASE_REF" =~ ^guacamole/guacd@sha256:[0-9a-f]{64}$ ]]; then
+  die "the base reference '$BASE_REF' is not guacamole/guacd@sha256:<64 hex>"
+fi
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+docker_save() { # docker_save <ref> <file>: one platform when the client can
+  docker save --platform "$PLATFORM" -o "$2" "$1" 2>/dev/null || docker save -o "$2" "$1"
+}
+docker_inspect() { # docker_inspect <ref>: config JSON of the platform's image
+  docker image inspect --platform "$PLATFORM" "$1" 2>/dev/null || docker image inspect "$1"
+}
+
+echo "=== guacd image gate: $IMAGE (base $BASE_REF, $PLATFORM)"
+docker pull --platform "$PLATFORM" "$BASE_REF" >/dev/null 2>&1 || die "cannot pull the base $BASE_REF"
+docker_save "$IMAGE" "$WORK/image.tar" || die "cannot save $IMAGE"
+docker_save "$BASE_REF" "$WORK/base.tar" || die "cannot save $BASE_REF"
+stage python3 -I "$HELPER" unpack "$WORK/image.tar" "$WORK/image" "$ARCH" >/dev/null
+stage python3 -I "$HELPER" unpack "$WORK/base.tar" "$WORK/base" "$ARCH" >/dev/null
+
+# 1. parent proof
+stage python3 -I "$HELPER" parent "$WORK/image" "$WORK/base"
+# 2. layer content
+stage python3 -I "$HELPER" layer "$WORK/image/last-layer.tar" "$WORK/base/dirs.tsv" "$ALLOWLIST"
+# 3. config
+docker_inspect "$IMAGE" > "$WORK/image-inspect.json" || die "cannot inspect $IMAGE"
+docker_inspect "$BASE_REF" > "$WORK/base-inspect.json" || die "cannot inspect $BASE_REF"
+stage python3 -I "$HELPER" config "$WORK/image-inspect.json" "$BASE_REF" "$WORK/base-inspect.json"
+
+# 4. runtime
+run() { docker run --rm --platform "$PLATFORM" --entrypoint sh "$IMAGE" -c "$1" 2>&1; }
+for z in UTC Asia/Karachi; do
+  run "test -f /usr/share/zoneinfo/$z" >/dev/null || die "zoneinfo: $z missing"
+done
+off="$(run 'TZ=Asia/Karachi date +%z')"
+[[ "$off" == "+0500" ]] || die "runtime: TZ=Asia/Karachi date +%z printed '$off', expected +0500"
+usr="$(run 'id -un')"
+[[ "$usr" == "guacd" ]] || die "runtime: the container user is '$usr', expected guacd"
+inst="$(run 'apk info -e -v tzdata')"
+label="$(docker image inspect --platform "$PLATFORM" --format '{{index .Config.Labels "guacd-tzdata.tzdata-version"}}' "$IMAGE" 2>/dev/null \
+  || docker image inspect --format '{{index .Config.Labels "guacd-tzdata.tzdata-version"}}' "$IMAGE")"
+[[ -n "$inst" && "$label" == "$inst" ]] || die "runtime: label guacd-tzdata.tzdata-version is '$label' but apk reports '$inst'"
+echo "ok: runtime checks (zoneinfo, +0500, user guacd, $inst)"
+echo "=== gate passed"

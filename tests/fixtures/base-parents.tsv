@@ -1,0 +1,7 @@
+etc	755	0	0
+etc/apk	755	0	0
+lib	755	0	0
+lib/apk	755	0	0
+lib/apk/db	755	0	0
+usr	755	0	0
+usr/share	755	0	0
