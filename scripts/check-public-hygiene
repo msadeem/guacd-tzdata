@@ -12,7 +12,8 @@ and exactly noreply@github.com). Project-specific patterns come from the untrack
 file named by HYGIENE_EXTRA_PATTERNS_FILE (one regular expression per line,
 case-insensitive; blank lines and lines starting with # are ignored).
 
-The repository scan refuses a dirty working tree (exit 2): it scans what will be
+Every commit and tag date must carry the +0000 offset (a local offset would publish the
+author's time zone). The repository scan refuses a dirty working tree (exit 2): it scans what will be
 pushed, so commit first. Binary blobs are scanned too (bytes decoded as latin-1).
 scripts/deny-patterns is exempt from the GENERIC patterns only (it holds their text);
 the private patterns and the e-mail rule still apply to it.
@@ -136,6 +137,17 @@ def scan_repo(repo, pats):
             continue
         units += 1
         findings += scan_text("commit " + rec[:12], rec, pats)
+    # dates: every author and committer date, and every annotated tag date, must be UTC (+0000)
+    for rec in git(repo, "log", "--all", "--format=%H|%ai|%ci").decode().splitlines():
+        sha, ad, cd = rec.split("|")
+        for what, d in (("author date", ad), ("committer date", cd)):
+            units += 1
+            if not d.endswith(" +0000"):
+                findings.append(("commit %s %s" % (sha[:12], what), "non-utc-date", 1))
+    for rec in git(repo, "for-each-ref", "--format=%(refname)|%(taggerdate:iso)").decode().splitlines():
+        ref, _, d = rec.partition("|")
+        if d and not d.endswith(" +0000"):
+            findings.append(("tag date of a ref", "non-utc-date", 1))
     refs = git(repo, "for-each-ref", "--format=%(refname)%0a%(taggername)%0a%(taggeremail)%0a%(contents)%00").decode("utf-8", "replace")
     for i, rec in enumerate(refs.split("\0")):
         if rec.strip():
