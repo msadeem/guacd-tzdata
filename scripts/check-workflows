@@ -177,13 +177,22 @@ if '$(cat BASE)' not in pub:
 
 df = read("Dockerfile")
 if df:
-    if re.search(r"^ARG BASE=", df, re.M):
+    cont = False
+    for ln in df.splitlines():
+        stripped = ln.strip()
+        if cont or not stripped or stripped.startswith("#"):
+            cont = ln.rstrip().endswith("\\") and bool(stripped) and not stripped.startswith("#") or (cont and ln.rstrip().endswith("\\"))
+            continue
+        if not re.match(r"^[A-Z]+(\s|$)", ln):
+            err("Dockerfile instructions must be upper-case at column 0: %s" % stripped[:40])
+        cont = ln.rstrip().endswith("\\")
+    if re.search(r"^\s*ARG\s+BASE=", df, re.M | re.I):
         err("Dockerfile gives ARG BASE a default")
-    if re.search(r"^\s*ENV\b.*\bTZ\b", df, re.M):
+    if re.search(r"^\s*ENV\b.*\bTZ\b", df, re.M | re.I):
         err("Dockerfile sets a TZ environment variable")
-    if not re.search(r"^FROM \$\{BASE\}\s*$", df, re.M):
+    if not re.search(r"^\s*FROM\s+\$\{BASE\}\s*$", df, re.M | re.I):
         err("Dockerfile has no plain 'FROM ${BASE}' final stage")
-    labels = re.findall(r"^LABEL\s+((?:.*\\\n)*.*)$", df, re.M)
+    labels = re.findall(r"^\s*LABEL\s+((?:.*\\\n)*.*)$", df, re.M | re.I)
     if not labels:
         err("Dockerfile has no LABEL instruction")
     else:
@@ -211,7 +220,7 @@ if df:
         src = dict(pairs).get("org.opencontainers.image.source", "")
         if not re.match(r"^https://github\.com/[A-Za-z0-9-]+/guacd-tzdata$", src):
             err("label org.opencontainers.image.source is not the public repo URL")
-    last_user = re.findall(r"^USER (\S+)", df, re.M)
+    last_user = re.findall(r"^\s*USER\s+(\S+)", df, re.M | re.I)
     if not last_user or last_user[-1] != "guacd":
         err("Dockerfile does not end as USER guacd")
 
