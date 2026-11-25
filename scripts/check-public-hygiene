@@ -17,9 +17,11 @@ pushed, so commit first. Binary blobs are scanned too (bytes decoded as latin-1)
 scripts/deny-patterns is exempt from the GENERIC patterns only (it holds their text);
 the private patterns and the e-mail rule still apply to it.
 
-Output never prints a matched value, only where it matched and how many times.
+Output never prints a matched value, only where it matched and how many times; a path
+that matched is shown as a hash, a blob whose path matched by its object id.
 Exit 0 clean, 1 findings, 2 usage, setup or dirty-tree error.
 """
+import hashlib
 import os
 import re
 import subprocess
@@ -93,10 +95,17 @@ def scan_repo(repo, pats):
             order.append(sha)
         if path:
             paths[sha].add(path)
+    flagged_paths = set()
+    n_path = 0
     for sha in order:
         for path in sorted(paths[sha]):
             units += 1
-            findings += scan_text("path " + path, path, pats)
+            n_path += 1
+            # the label is a hash: a path that matched may itself be the private value
+            f = scan_text("path #%d (sha256 %s)" % (n_path, hashlib.sha256(path.encode()).hexdigest()[:12]), path, pats)
+            if f:
+                flagged_paths.add(path)
+            findings += f
     meta = git(repo, "cat-file", "--batch-check", data=("\n".join(order) + "\n").encode()) if order else b""
     blobs = [l.split()[0] for l in meta.decode().splitlines() if len(l.split()) == 3 and l.split()[1] == "blob"]
     if blobs:
@@ -112,7 +121,10 @@ def scan_repo(repo, pats):
                 binaries += 1
             text = data.decode("latin-1")
             only_patterns_file = paths[sha] == {PATTERN_FILE}
-            label = "blob %s (%s)" % (sha[:12], ", ".join(sorted(paths[sha])) or "no path")
+            if paths[sha] & flagged_paths or not paths[sha]:
+                label = "blob %s" % sha[:12]
+            else:
+                label = "blob %s (%s)" % (sha[:12], ", ".join(sorted(paths[sha])))
             findings += scan_text(label, text, pats, generic=not only_patterns_file)
     try:
         log = git(repo, "log", "--all", "--format=%H|%an|%ae|%cn|%ce|%s|%b%x00").decode("utf-8", "replace")
