@@ -235,6 +235,18 @@ def load_config(path):
     return j.get("Config") or j.get("config") or {}
 
 
+OWN_LABELS = {
+    "org.opencontainers.image.source", "org.opencontainers.image.revision",
+    "org.opencontainers.image.created", "org.opencontainers.image.base.name",
+    "org.opencontainers.image.base.digest", "guacd-tzdata.tzdata-version",
+    "guacd-tzdata.workflow-run-id",
+}
+
+
+def base_labels(path):
+    return (load_config(path).get("Labels") or {}).keys()
+
+
 def cmd_config(cfgpath, base_ref, basecfgpath):
     cfg, base = load_config(cfgpath), load_config(basecfgpath)
     if cfg.get("User") != "guacd":
@@ -245,6 +257,13 @@ def cmd_config(cfgpath, base_ref, basecfgpath):
     got = (cfg.get("Labels") or {}).get("org.opencontainers.image.base.name")
     if got != base_ref:
         fail("config check: label org.opencontainers.image.base.name is %s, expected %s" % (got, base_ref))
+    allowed = set(base_labels(basecfgpath)) | OWN_LABELS
+    for k in sorted(cfg.get("Labels") or {}):
+        if k not in allowed:
+            fail("config check: unexpected label key %s (only the base's labels and the guacd-tzdata ones are allowed)" % k)
+    for e in cfg.get("Env") or []:
+        if e.split("=", 1)[0] == "TZ":
+            fail("config check: Config.Env sets TZ (the image must not set a default time zone)")
     print("ok: config checks")
 
 
