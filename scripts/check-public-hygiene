@@ -13,7 +13,8 @@ file named by HYGIENE_EXTRA_PATTERNS_FILE (one regular expression per line,
 case-insensitive; blank lines and lines starting with # are ignored).
 
 Every commit and tag date must carry the +0000 offset (a local offset would publish the
-author's time zone). The repository scan refuses a dirty working tree (exit 2): it scans what will be
+author's time zone), except for commits whose committer e-mail is exactly
+noreply@github.com (made by GitHub itself; the number skipped is printed). The repository scan refuses a dirty working tree (exit 2): it scans what will be
 pushed, so commit first. Binary blobs are scanned too (bytes decoded as latin-1).
 scripts/deny-patterns is exempt from the GENERIC patterns only (it holds their text);
 the private patterns and the e-mail rule still apply to it.
@@ -138,8 +139,14 @@ def scan_repo(repo, pats):
         units += 1
         findings += scan_text("commit " + rec[:12], rec, pats)
     # dates: every author and committer date, and every annotated tag date, must be UTC (+0000)
-    for rec in git(repo, "log", "--all", "--format=%H|%ai|%ci").decode().splitlines():
-        sha, ad, cd = rec.split("|")
+    skipped = 0
+    for rec in git(repo, "log", "--all", "--format=%H|%ai|%ci|%ce").decode().splitlines():
+        sha, ad, cd, ce = rec.split("|")
+        if ce == "noreply@github.com":
+            # GitHub's own commits (test merges, web merges) carry the offset of whoever
+            # triggered them; exempt by the committer being GitHub, never by the author
+            skipped += 1
+            continue
         for what, d in (("author date", ad), ("committer date", cd)):
             units += 1
             if not d.endswith(" +0000"):
@@ -153,7 +160,7 @@ def scan_repo(repo, pats):
         if rec.strip():
             units += 1
             findings += scan_text("ref #%d" % i, rec, pats)
-    return findings, units, binaries
+    return findings, units, binaries, skipped
 
 
 def main():
@@ -167,7 +174,7 @@ def main():
 def _main():
     args = sys.argv[1:]
     pats, n_extra = load_patterns()
-    binaries = 0
+    binaries = skipped = 0
     if args == ["--stdin"]:
         findings = scan_text("stdin", sys.stdin.read(), pats)
         units = 1
@@ -178,9 +185,10 @@ def _main():
         elif args:
             print(__doc__)
             sys.exit(2)
-        findings, units, binaries = scan_repo(repo, pats)
+        findings, units, binaries, skipped = scan_repo(repo, pats)
     print("hygiene: scanned %d unit(s) (%d binary blob(s) included) with %d generic pattern(s) + email rule + %d private pattern(s)"
           % (units, binaries, len(pats) - n_extra, n_extra))
+    print("hygiene: date rule skipped %d GitHub-made commit(s) (committer noreply@github.com)" % skipped)
     if findings:
         for label, name, c in findings:
             print("hygiene: FAIL: %s: %d match(es) of %s" % (label, c, name))
