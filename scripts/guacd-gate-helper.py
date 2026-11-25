@@ -28,16 +28,23 @@ def fail(msg):
 
 
 def norm(name):
-    """Normalise a tar member name. Returns None for names that can never be allowed."""
+    """Canonical form of a tar member name: no empty or '.' components, no leading or trailing
+    slash. Returns None for names that can never be allowed (absolute, or with '..')."""
     n = name
-    while n.startswith("./"):
-        n = n[2:]
-    n = n.rstrip("/")
-    if n in ("", "."):
-        return ""
-    if n.startswith("/") or ".." in n.split("/"):
+    if n.startswith("/"):
         return None
-    return n
+    parts = n.split("/")
+    if ".." in parts:
+        return None
+    return "/".join(p for p in parts if p not in ("", "."))
+
+
+def spelled_canonically(raw, canonical):
+    """True when the raw name is the canonical one, allowing a leading './' and a trailing '/'."""
+    r = raw
+    while r.startswith("./"):
+        r = r[2:]
+    return r.rstrip("/") == canonical
 
 
 def inside(path, root):
@@ -149,6 +156,8 @@ def cmd_layer(layer, tsv, allow):
             continue
         if n is None:
             fail("layer content check: %s is not in scripts/guacd-layer-allowlist%s" % (raw, ALLOW_HINT))
+        if not spelled_canonically(raw, n):
+            fail("layer content check: member name %r is not canonical (empty or '.' components); refused" % raw)
         if posixpath.basename(n).startswith(".wh."):
             fail("layer content check: %s is a whiteout entry (deleting a base file); not allowed" % n)
         if inside(n, ZONEINFO):
