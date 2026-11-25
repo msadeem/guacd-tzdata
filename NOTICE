@@ -1,0 +1,13 @@
+guacd-tzdata
+Copyright 2026 the repository owner
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+That license covers the files in this repository only.
+
+The container image built from this repository is derived from the upstream
+`guacamole/guacd` image (Apache Guacamole, https://guacamole.apache.org/,
+Apache License 2.0) and adds the Alpine Linux `tzdata` package. The image also
+contains the upstream image's other components (Alpine Linux and third-party
+packages, some under other licenses such as the GNU GPL for parts of busybox),
+each under its own license. This repository does not copy those license texts;
+see the upstream project and the package sources for them.
