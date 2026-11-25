@@ -77,6 +77,12 @@ elif case == "hard-out":
 elif case == "sym-dot-escape":
     add("usr/share/zoneinfo/s", "sym", 0o777, link=".")
     add("usr/share/zoneinfo/Evil", "sym", 0o777, link="s/s/s/../../../etc/shadow")
+elif case == "dslash-escape":
+    add("usr/share/zoneinfo//s", "sym", 0o777, link=".")
+    add("usr/share/zoneinfo/Evil", "sym", 0o777, link="s/s/s/../../../etc/shadow")
+elif case == "dotseg-escape":
+    add("usr/share/zoneinfo/./s", "sym", 0o777, link=".")
+    add("usr/share/zoneinfo/Evil", "sym", 0o777, link="s/s/s/../../../etc/shadow")
 elif case == "sym-dot-hard":
     add("usr/share/zoneinfo/s", "sym", 0o777, link=".")
     add("usr/share/zoneinfo/Hard", "hard", link="usr/share/zoneinfo/s/s/UTC")

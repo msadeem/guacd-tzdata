@@ -69,6 +69,10 @@ expect_fail "(e) a hard link whose target is outside the tree" "usr/share/zonein
   "$GATE" --check-layer "$(layer hard-out)" "$PARENTS"
 expect_fail "(e) symlink 's -> .' plus 'Evil -> s/s/s/../../../etc/shadow' resolves outside" "usr/share/zoneinfo/Evil is a symlink to s/s/s/../../../etc/shadow, outside usr/share/zoneinfo/" \
   "$GATE" --check-layer "$(layer sym-dot-escape)" "$PARENTS"
+expect_fail "(e) a member named with // (the escape hidden from the link map) is refused" "member name 'usr/share/zoneinfo//s' is not canonical" \
+  "$GATE" --check-layer "$(layer dslash-escape)" "$PARENTS"
+expect_fail "(e) a member named with a /./ component is refused" "member name 'usr/share/zoneinfo/./s' is not canonical" \
+  "$GATE" --check-layer "$(layer dotseg-escape)" "$PARENTS"
 expect_fail "(e) a hard link reached through a symlinked directory" "usr/share/zoneinfo/Hard is a hard link to usr/share/zoneinfo/s/s/UTC through a symlinked directory" \
   "$GATE" --check-layer "$(layer sym-dot-hard)" "$PARENTS"
 expect_fail "(e) a hard link with .. components" "usr/share/zoneinfo/Asia/Hard is a hard link to usr/share/zoneinfo/Asia/../../../../etc/shadow, outside" \
@@ -230,6 +234,8 @@ mutant no-config-bind "$PUB" '"$pushed_config" != "$gated_config"' '"$pushed_con
 mutant no-republish-guard "$PUB" "already published" "published before" "no refusal for an already published"
 mutant loose-media-type "$PUB" "application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json) ;;" "*image.manifest*) ;;" "must accept exactly the OCI and Docker v2 single-manifest media types"
 mutant attest-summary "$PUB" "show-summary: false" "show-summary: true" "lacks show-summary: false"
+mutant unquoted-label Dockerfile 'USER guacd' 'LABEL com.other.x=y
+USER guacd' "label com.other.x must be key=\"value\" (quoted)"
 mutant second-label Dockerfile 'USER guacd' 'LABEL other.key="v"
 USER guacd' "label keys must be exactly"
 mutant build-script-digest scripts/build-guacd-image 'set -euo pipefail' "set -euo pipefail
@@ -282,7 +288,9 @@ out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H2/scripts/check-public-hygiene" --
 H3="$WORK/histpath"; mkrepo "$H3"
 (cd "$H3" && echo ok > zzprivateword.txt && git add -A && git commit -q -m "add" && git rm -q zzprivateword.txt && git commit -q -m "remove")
 out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H3/scripts/check-public-hygiene" --repo "$H3" 2>&1)"; rc=$?
-[[ $rc -eq 1 && "$out" == *"hygiene: FAIL: path zzprivateword.txt: 1 match(es) of private-pattern-1"* ]] && ok "a file name that existed only in an earlier commit is found" || bad "historical file name" "rc=$rc $out"
+PH="$(printf 'zzprivateword.txt' | python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:12])')"
+[[ $rc -eq 1 && "$out" == *"hygiene: FAIL: path #"*"(sha256 $PH): 1 match(es) of private-pattern-1"* ]] && ok "a file name that existed only in an earlier commit is found (hashed label)" || bad "historical file name" "rc=$rc $out"
+[[ "$out" != *"zzprivateword"* ]] && ok "the private word never appears in the scanner output (path match)" || bad "private word printed for a path match"
 H4="$WORK/dirty"; mkrepo "$H4"; echo more >> "$H4/a.txt"
 out="$("$H4/scripts/check-public-hygiene" --repo "$H4" 2>&1)"; rc=$?
 [[ $rc -eq 2 && "$out" == *"working tree is dirty; commit or stash before the pre-push scan"* ]] && ok "a dirty working tree is refused (exit 2)" || bad "dirty tree" "rc=$rc $out"
