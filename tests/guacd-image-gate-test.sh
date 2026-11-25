@@ -131,10 +131,26 @@ cfg "$WORK/base.json" guacd '["/opt/guacamole/entrypoint.sh"]' ""
 cfg "$WORK/c-good.json" guacd '["/opt/guacamole/entrypoint.sh"]' "$BASE_REF"
 cfg "$WORK/c-root.json" root '["/opt/guacamole/entrypoint.sh"]' "$BASE_REF"
 cfg "$WORK/c-ep.json" guacd '["/bin/sh"]' "$BASE_REF"
+cfgx() { # cfgx <file> <extra label key> <env json>
+  python3 - "$1" "$2" "$3" "$BASE_REF" <<'PY'
+import json, sys
+f, key, env, ref = sys.argv[1:]
+labels = {"org.opencontainers.image.base.name": ref}
+if key:
+    labels[key] = "v"
+json.dump({"config": {"User": "guacd", "Entrypoint": ["/opt/guacamole/entrypoint.sh"], "Labels": labels, "Env": json.loads(env)}}, open(f, "w"))
+PY
+}
+cfgx "$WORK/c-extra-label.json" "com.example.other" '["PATH=/usr/bin"]'
+cfgx "$WORK/c-env-tz.json" "" '["PATH=/usr/bin","TZ=Asia/Karachi"]'
+cfgx "$WORK/c-clean-x.json" "guacd-tzdata.tzdata-version" '["PATH=/usr/bin"]'
 cfg "$WORK/c-label.json" guacd '["/opt/guacamole/entrypoint.sh"]' "guacamole/guacd@sha256:other"
 expect_pass "a good config passes" "ok: config checks" "$GATE" --check-config "$WORK/c-good.json" "$BASE_REF" "$WORK/base.json"
 expect_fail "(g) Config.User root" "config check: Config.User is root, expected guacd" "$GATE" --check-config "$WORK/c-root.json" "$BASE_REF" "$WORK/base.json"
 expect_fail "a different entrypoint" "config check: Config.Entrypoint" "$GATE" --check-config "$WORK/c-ep.json" "$BASE_REF" "$WORK/base.json"
+expect_fail "an unexpected label key in the image config" "config check: unexpected label key com.example.other" "$GATE" --check-config "$WORK/c-extra-label.json" "$BASE_REF" "$WORK/base.json"
+expect_fail "a TZ entry in Config.Env" "config check: Config.Env sets TZ" "$GATE" --check-config "$WORK/c-env-tz.json" "$BASE_REF" "$WORK/base.json"
+expect_pass "an own label key and an Env without TZ pass" "ok: config checks" "$GATE" --check-config "$WORK/c-clean-x.json" "$BASE_REF" "$WORK/base.json"
 expect_fail "a wrong base label" "config check: label org.opencontainers.image.base.name is guacamole/guacd@sha256:other" "$GATE" --check-config "$WORK/c-label.json" "$BASE_REF" "$WORK/base.json"
 
 echo "== gate failure messages with a stub docker (no Docker needed)"
@@ -234,6 +250,12 @@ mutant no-config-bind "$PUB" '"$pushed_config" != "$gated_config"' '"$pushed_con
 mutant no-republish-guard "$PUB" "already published" "published before" "no refusal for an already published"
 mutant loose-media-type "$PUB" "application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json) ;;" "*image.manifest*) ;;" "must accept exactly the OCI and Docker v2 single-manifest media types"
 mutant attest-summary "$PUB" "show-summary: false" "show-summary: true" "lacks show-summary: false"
+mutant lowercase-label Dockerfile 'USER guacd' 'label com.other.x="y"
+USER guacd' "Dockerfile instructions must be upper-case at column 0: label"
+mutant indented-label Dockerfile 'USER guacd' '  LABEL com.other.x="y"
+USER guacd' "Dockerfile instructions must be upper-case at column 0:"
+mutant lowercase-env-tz Dockerfile 'USER guacd' 'env TZ=Asia/Karachi
+USER guacd' "Dockerfile instructions must be upper-case at column 0: env"
 mutant unquoted-label Dockerfile 'USER guacd' 'LABEL com.other.x=y
 USER guacd' "label com.other.x must be key=\"value\" (quoted)"
 mutant second-label Dockerfile 'USER guacd' 'LABEL other.key="v"
