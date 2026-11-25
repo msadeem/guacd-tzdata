@@ -153,9 +153,12 @@ def cmd_layer(layer, tsv, allow):
         raw = m.name
         n = norm(raw)
         if n == "":
-            continue
+            fail("layer content check: the layer root entry %r is not allowed (it would change / itself)" % raw)
         if n is None:
             fail("layer content check: %s is not in scripts/guacd-layer-allowlist%s" % (raw, ALLOW_HINT))
+        for key in m.pax_headers:
+            if "xattr" in key.lower():
+                fail("layer content check: %s carries an extended attribute (%s); not allowed" % (n, key.split(".")[-1]))
         if not spelled_canonically(raw, n):
             fail("layer content check: member name %r is not canonical (empty or '.' components); refused" % raw)
         if posixpath.basename(n).startswith(".wh."):
@@ -206,6 +209,10 @@ def cmd_layer(layer, tsv, allow):
         if n in book or n in extra:
             if not m.isreg():
                 fail("layer content check: %s must be a regular file" % n)
+            if m.uid != 0 or m.gid != 0:
+                fail("layer content check: %s is not owned by root (uid %d, gid %d)" % (n, m.uid, m.gid))
+            if m.mode & 0o022:
+                fail("layer content check: %s is group/world-writable" % n)
             if m.mode & 0o7111:
                 fail("layer content check: %s has setuid, setgid or executable bits" % n)
             if n in extra:
@@ -243,6 +250,11 @@ OWN_LABELS = {
 }
 
 
+# Every config key except Labels must equal the base's: the layer is the only change.
+COMPARED_KEYS = ["Env", "Cmd", "Entrypoint", "User", "Volumes", "WorkingDir", "ExposedPorts",
+                 "StopSignal", "Healthcheck", "OnBuild", "Shell"]
+
+
 def base_labels(path):
     return (load_config(path).get("Labels") or {}).keys()
 
@@ -264,6 +276,10 @@ def cmd_config(cfgpath, base_ref, basecfgpath):
     for e in cfg.get("Env") or []:
         if e.split("=", 1)[0] == "TZ":
             fail("config check: Config.Env sets TZ (the image must not set a default time zone)")
+    for k in COMPARED_KEYS:
+        a, b = cfg.get(k) or None, base.get(k) or None
+        if a != b:
+            fail("config check: Config.%s %s differs from the base's %s" % (k, json.dumps(a), json.dumps(b)))
     print("ok: config checks")
 
 
