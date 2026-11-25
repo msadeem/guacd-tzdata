@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# build-guacd-image -- build the guacd image with a time-zone database.
+#
+#   scripts/build-guacd-image <tag>
+#
+# Environment (all optional):
+#   REVISION   commit for the revision label (default: git HEAD, else "unknown")
+#   CREATED    creation time for the created label (default: now, UTC)
+#   RUN_ID     value of the workflow-run-id label (default: "local")
+#   PLATFORM   target platform (default: linux/amd64; the only supported one)
+#
+# The base reference is read from the BASE file, never from an image label and
+# never from a literal in this script. The image is built twice: a probe build
+# learns which tzdata version apk installs, then the final image is built with
+# that exact version, so the version label equals what is installed by
+# construction. The version is exact inside one build; reproducibility across
+# time is the published digest.
+set -euo pipefail
+
+TAG="${1:?usage: $0 <tag>}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLATFORM="${PLATFORM:-linux/amd64}"
+
+BASE="$(tr -d '[:space:]' < "$ROOT/BASE")"
+if [[ ! "$BASE" =~ ^guacamole/guacd@sha256:[0-9a-f]{64}$ ]]; then
+  echo "FAIL: BASE is not a guacamole/guacd@sha256:<64 hex> reference" >&2
+  exit 2
+fi
+BASE_DIGEST="${BASE#*@}"
+REVISION="${REVISION:-$(git -C "$ROOT" rev-parse --verify -q HEAD 2>/dev/null || echo unknown)}"
+CREATED="${CREATED:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+RUN_ID="${RUN_ID:-local}"
+
+echo "=== pulling the base for $PLATFORM: $BASE"
+docker pull --platform "$PLATFORM" "$BASE" >/dev/null
+
+PROBE_TAG="guacd-tzdata-probe:$$"
+cleanup() { docker image rm -f "$PROBE_TAG" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+echo "=== probe build (learns the tzdata version)"
+docker buildx build --platform "$PLATFORM" --provenance=false --sbom=false --load \
+  --target probe --build-arg "BASE=$BASE" -t "$PROBE_TAG" "$ROOT" >/dev/null
+PROBED="$(docker run --rm --platform "$PLATFORM" --entrypoint sh "$PROBE_TAG" -c 'apk info -e -v tzdata')"
+if [[ ! "$PROBED" =~ ^tzdata-[0-9A-Za-z._-]+$ ]]; then
+  echo "FAIL: unexpected 'apk info -e -v tzdata' output: $PROBED" >&2
+  exit 1
+fi
+TZDATA_VERSION="${PROBED#tzdata-}"
+echo "probed tzdata version: $TZDATA_VERSION"
+
+echo "=== final build: $TAG"
+docker buildx build --platform "$PLATFORM" --provenance=false --sbom=false --load \
+  --build-arg "BASE=$BASE" --build-arg "BASE_DIGEST=$BASE_DIGEST" \
+  --build-arg "TZDATA_VERSION=$TZDATA_VERSION" --build-arg "REVISION=$REVISION" \
+  --build-arg "CREATED=$CREATED" --build-arg "RUN_ID=$RUN_ID" \
+  -t "$TAG" "$ROOT"
+echo "built $TAG (tzdata $TZDATA_VERSION)"
