@@ -8,9 +8,11 @@ out, case = sys.argv[1], sys.argv[2]
 t = tarfile.open(out, "w", format=tarfile.GNU_FORMAT)
 
 
-def add(name, kind="file", mode=0o644, data=b"x", link="", uid=0, gid=0):
+def add(name, kind="file", mode=0o644, data=b"x", link="", uid=0, gid=0, pax=None):
     ti = tarfile.TarInfo(name)
     ti.mode, ti.uid, ti.gid = mode, uid, gid
+    if pax:
+        ti.pax_headers = pax
     if kind == "dir":
         ti.type = tarfile.DIRTYPE
         t.addfile(ti)
@@ -74,6 +76,19 @@ elif case == "whiteout":
     add("usr/share/zoneinfo/.wh.UTC")
 elif case == "hard-out":
     add("usr/share/zoneinfo/Evil", "hard", link="etc/apk/world")
+elif case == "root-entry":
+    add("./", "dir", 0o777, uid=1000)
+elif case == "xattr":
+    t.close()
+    t = tarfile.open(out, "w", format=tarfile.PAX_FORMAT)
+    parents()
+    bookkeeping()
+    zones()
+    add("usr/share/zoneinfo/Asia/Opaque", pax={"SCHILY.xattr.trusted.overlay.opaque": "y"})
+elif case == "book-uid":
+    add("etc/apk/world", uid=1000, gid=1000)
+elif case == "book-writable":
+    add("lib/apk/db/triggers", mode=0o666)
 elif case == "sym-dot-escape":
     add("usr/share/zoneinfo/s", "sym", 0o777, link=".")
     add("usr/share/zoneinfo/Evil", "sym", 0o777, link="s/s/s/../../../etc/shadow")

@@ -10,6 +10,7 @@
 # real-image cases (a), (b) and (p) use Docker and need one base pull.
 # Every case asserts its own message, not just a non-zero exit.
 set -uo pipefail
+export TZ=UTC
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GATE="$ROOT/scripts/guacd-image-gate"
@@ -89,6 +90,14 @@ expect_fail "(e2) a group/world-writable zoneinfo file" "usr/share/zoneinfo/Asia
   "$GATE" --check-layer "$(layer world-writable-file)" "$PARENTS"
 expect_fail "(e2) a zoneinfo file not owned by root" "usr/share/zoneinfo/Asia/Owned is not owned by root" \
   "$GATE" --check-layer "$(layer not-root)" "$PARENTS"
+expect_fail "the layer root entry './' is refused" "the layer root entry '.' is not allowed" \
+  "$GATE" --check-layer "$(layer root-entry)" "$PARENTS"
+expect_fail "a PAX extended-attribute record is refused" "usr/share/zoneinfo/Asia/Opaque carries an extended attribute (opaque); not allowed" \
+  "$GATE" --check-layer "$(layer xattr)" "$PARENTS"
+expect_fail "a bookkeeping file not owned by root" "etc/apk/world is not owned by root" \
+  "$GATE" --check-layer "$(layer book-uid)" "$PARENTS"
+expect_fail "a group/world-writable bookkeeping file" "lib/apk/db/triggers is group/world-writable" \
+  "$GATE" --check-layer "$(layer book-writable)" "$PARENTS"
 expect_fail "(e2) a zoneinfo file with the executable bit" "usr/share/zoneinfo/Asia/Run has setuid, setgid or executable bits" \
   "$GATE" --check-layer "$(layer exec)" "$PARENTS"
 expect_fail "(e2) a zoneinfo file with the setuid bit" "usr/share/zoneinfo/Asia/Su has setuid, setgid or executable bits" \
@@ -143,7 +152,20 @@ PY
 }
 cfgx "$WORK/c-extra-label.json" "com.example.other" '["PATH=/usr/bin"]'
 cfgx "$WORK/c-env-tz.json" "" '["PATH=/usr/bin","TZ=Asia/Karachi"]'
-cfgx "$WORK/c-clean-x.json" "guacd-tzdata.tzdata-version" '["PATH=/usr/bin"]'
+cfgx "$WORK/c-clean-x.json" "guacd-tzdata.tzdata-version" '[]'
+cfgk() { # cfgk <file> <json of extra Config keys>
+  python3 - "$1" "$2" "$BASE_REF" <<'PY'
+import json, sys
+f, extra, ref = sys.argv[1:]
+c = {"User": "guacd", "Entrypoint": ["/opt/guacamole/entrypoint.sh"], "Labels": {"org.opencontainers.image.base.name": ref}}
+c.update(json.loads(extra))
+json.dump({"config": c}, open(f, "w"))
+PY
+}
+cfgk "$WORK/c-preload.json" '{"Env": ["LD_PRELOAD=/usr/share/zoneinfo/x"]}'
+cfgk "$WORK/c-cmd.json" '{"Cmd": ["/bin/sh", "-c", "id"]}'
+cfgk "$WORK/c-vol.json" '{"Volumes": {"/": {}}}'
+cfgk "$WORK/c-wd.json" '{"WorkingDir": "/tmp"}'
 cfg "$WORK/c-label.json" guacd '["/opt/guacamole/entrypoint.sh"]' "guacamole/guacd@sha256:other"
 expect_pass "a good config passes" "ok: config checks" "$GATE" --check-config "$WORK/c-good.json" "$BASE_REF" "$WORK/base.json"
 expect_fail "(g) Config.User root" "config check: Config.User is root, expected guacd" "$GATE" --check-config "$WORK/c-root.json" "$BASE_REF" "$WORK/base.json"
@@ -151,6 +173,10 @@ expect_fail "a different entrypoint" "config check: Config.Entrypoint" "$GATE" -
 expect_fail "an unexpected label key in the image config" "config check: unexpected label key com.example.other" "$GATE" --check-config "$WORK/c-extra-label.json" "$BASE_REF" "$WORK/base.json"
 expect_fail "a TZ entry in Config.Env" "config check: Config.Env sets TZ" "$GATE" --check-config "$WORK/c-env-tz.json" "$BASE_REF" "$WORK/base.json"
 expect_pass "an own label key and an Env without TZ pass" "ok: config checks" "$GATE" --check-config "$WORK/c-clean-x.json" "$BASE_REF" "$WORK/base.json"
+expect_fail "an extra Env variable (LD_PRELOAD)" "config check: Config.Env [\"LD_PRELOAD=/usr/share/zoneinfo/x\"] differs from the base's null" "$GATE" --check-config "$WORK/c-preload.json" "$BASE_REF" "$WORK/base.json"
+expect_fail "a changed Cmd" "config check: Config.Cmd" "$GATE" --check-config "$WORK/c-cmd.json" "$BASE_REF" "$WORK/base.json"
+expect_fail "added Volumes" "config check: Config.Volumes" "$GATE" --check-config "$WORK/c-vol.json" "$BASE_REF" "$WORK/base.json"
+expect_fail "a changed WorkingDir" "config check: Config.WorkingDir" "$GATE" --check-config "$WORK/c-wd.json" "$BASE_REF" "$WORK/base.json"
 expect_fail "a wrong base label" "config check: label org.opencontainers.image.base.name is guacamole/guacd@sha256:other" "$GATE" --check-config "$WORK/c-label.json" "$BASE_REF" "$WORK/base.json"
 
 echo "== gate failure messages with a stub docker (no Docker needed)"
@@ -250,6 +276,7 @@ mutant no-config-bind "$PUB" '"$pushed_config" != "$gated_config"' '"$pushed_con
 mutant no-republish-guard "$PUB" "already published" "published before" "no refusal for an already published"
 mutant loose-media-type "$PUB" "application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json) ;;" "*image.manifest*) ;;" "must accept exactly the OCI and Docker v2 single-manifest media types"
 mutant attest-summary "$PUB" "show-summary: false" "show-summary: true" "lacks show-summary: false"
+mutant buildx-driver "$PUB" "          driver: docker" "          driver: docker-container" "must set 'driver: docker'"
 mutant lowercase-label Dockerfile 'USER guacd' 'label com.other.x="y"
 USER guacd' "Dockerfile instructions must be upper-case at column 0: label"
 mutant indented-label Dockerfile 'USER guacd' '  LABEL com.other.x="y"
@@ -271,6 +298,10 @@ mutant label-subst Dockerfile 'org.opencontainers.image.created="${CREATED}"' 'o
 mutant tz-env Dockerfile "USER root" "ENV TZ=Asia/Karachi
 USER root" "sets a TZ environment variable"
 mutant user-root Dockerfile "USER guacd" "USER root" "does not end as USER guacd"
+
+d="$WORK/mut-yaml"; rm -rf "$d"; mkdir -p "$d"; (cd "$ROOT" && cp -R .github Dockerfile BASE scripts "$d/")
+printf 'on: push\npermissions: write-all\n' > "$d/.github/workflows/release.yaml"
+expect_fail "(f) an extra workflow file (.yaml) is refused" "unexpected file .github/workflows/release.yaml" "$CHECK" "$d"
 
 echo "== hygiene scanner (own fail-on-purpose fixtures)"
 HYG="$ROOT/scripts/check-public-hygiene"
@@ -313,6 +344,14 @@ out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H3/scripts/check-public-hygiene" --
 PH="$(printf 'zzprivateword.txt' | python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:12])')"
 [[ $rc -eq 1 && "$out" == *"hygiene: FAIL: path #"*"(sha256 $PH): 1 match(es) of private-pattern-1"* ]] && ok "a file name that existed only in an earlier commit is found (hashed label)" || bad "historical file name" "rc=$rc $out"
 [[ "$out" != *"zzprivateword"* ]] && ok "the private word never appears in the scanner output (path match)" || bad "private word printed for a path match"
+H9="$WORK/dates"; mkrepo "$H9"
+expect_pass "UTC commit dates pass the date rule" "hygiene: clean (0 findings)" "$H9/scripts/check-public-hygiene" --repo "$H9"
+(cd "$H9" && GIT_AUTHOR_DATE="2026-01-01T10:00:00+0500" git commit -q --allow-empty -m "local author date")
+out="$("$H9/scripts/check-public-hygiene" --repo "$H9" 2>&1)"; rc=$?
+[[ $rc -eq 1 && "$out" == *"author date: 1 match(es) of non-utc-date"* ]] && ok "a non-UTC author date is refused" || bad "non-UTC author date" "rc=$rc $out"
+(cd "$H9" && git reset -q --hard HEAD~1 && GIT_COMMITTER_DATE="2026-01-01T10:00:00-0300" git commit -q --allow-empty -m "local committer date")
+out="$("$H9/scripts/check-public-hygiene" --repo "$H9" 2>&1)"; rc=$?
+[[ $rc -eq 1 && "$out" == *"committer date: 1 match(es) of non-utc-date"* ]] && ok "a non-UTC committer date is refused" || bad "non-UTC committer date" "rc=$rc $out"
 H4="$WORK/dirty"; mkrepo "$H4"; echo more >> "$H4/a.txt"
 out="$("$H4/scripts/check-public-hygiene" --repo "$H4" 2>&1)"; rc=$?
 [[ $rc -eq 2 && "$out" == *"working tree is dirty; commit or stash before the pre-push scan"* ]] && ok "a dirty working tree is refused (exit 2)" || bad "dirty tree" "rc=$rc $out"
@@ -339,9 +378,6 @@ out="$(HYGIENE_EXTRA_PATTERNS_FILE="$PRIV" "$H8/scripts/check-public-hygiene" --
 git clone -q --no-local "$ROOT" "$WORK/realclone" 2>/dev/null || git clone -q "$ROOT" "$WORK/realclone"
 expect_pass "the real repo (committed state) passes the generic scan" "hygiene: clean (0 findings)" "$WORK/realclone/scripts/check-public-hygiene" --repo "$WORK/realclone"
 
-echo "== workflow files carry the (p) label rule"
-# (p) below relies on a base-name LABEL in its Dockerfile; asserted here so a label rename cannot silently move (p)'s failure point.
-# (asserted on the generated Dockerfile text in the real-image section below, where it is written)
 
 echo "== real-image cases (need Docker and one base pull)"
 if [[ $DOCKER -eq 0 ]]; then
