@@ -52,7 +52,7 @@ def inside(path, root):
 
 
 def read_allowlist(path):
-    zone, book, extra = None, set(), {}
+    zone, book, extra = None, {}, {}
     with open(path) as f:
         for line in f:
             line = line.split("#", 1)[0].strip()
@@ -61,8 +61,8 @@ def read_allowlist(path):
             parts = line.split()
             if parts[0] == "zoneinfo" and len(parts) == 2:
                 zone = parts[1]
-            elif parts[0] == "bookkeeping" and len(parts) == 2:
-                book.add(parts[1])
+            elif parts[0] == "bookkeeping" and len(parts) in (2, 3) and (len(parts) == 2 or parts[2] == "size=0"):
+                book[parts[1]] = 0 if len(parts) == 3 else None
             elif parts[0] == "extra" and len(parts) == 3:
                 extra[parts[1]] = parts[2]
             else:
@@ -85,6 +85,15 @@ def read_parents(path):
 
 
 MAX_HOPS = 40
+MAX_REPORTED = 50
+
+
+class Reject(Exception):
+    pass
+
+
+def reject(msg):
+    raise Reject(msg)
 
 
 class Unresolvable(Exception):
@@ -149,89 +158,104 @@ def cmd_layer(layer, tsv, allow):
         n = norm(m.name)
         if n and m.issym():
             links[n] = m.linkname
-    for m in members:
+    def check(m):
         raw = m.name
         n = norm(raw)
         if n == "":
-            fail("layer content check: the layer root entry %r is not allowed (it would change / itself)" % raw)
+            reject("layer content check: the layer root entry %r is not allowed (it would change / itself)" % raw)
         if n is None:
-            fail("layer content check: %s is not in scripts/guacd-layer-allowlist%s" % (raw, ALLOW_HINT))
+            reject("layer content check: %s is not in scripts/guacd-layer-allowlist%s" % (raw, ALLOW_HINT))
         for key in m.pax_headers:
             if "xattr" in key.lower():
-                fail("layer content check: %s carries an extended attribute (%s); not allowed" % (n, key.split(".")[-1]))
+                reject("layer content check: %s carries an extended attribute (%s); not allowed" % (n, key.split(".")[-1]))
         if not spelled_canonically(raw, n):
-            fail("layer content check: member name %r is not canonical (empty or '.' components); refused" % raw)
+            reject("layer content check: member name %r is not canonical (empty or '.' components); refused" % raw)
         if posixpath.basename(n).startswith(".wh."):
-            fail("layer content check: %s is a whiteout entry (deleting a base file); not allowed" % n)
+            reject("layer content check: %s is a whiteout entry (deleting a base file); not allowed" % n)
         if inside(n, ZONEINFO):
             parent = posixpath.dirname(n)
             try:
                 if resolve(parent, links) != parent:
-                    fail("layer content check: %s is under a symlinked directory" % n)
+                    reject("layer content check: %s is under a symlinked directory" % n)
             except Unresolvable as e:
-                fail("layer content check: %s is under a symlinked directory that cannot be resolved inside %s/ (%s)" % (n, ZONEINFO, e))
+                reject("layer content check: %s is under a symlinked directory that cannot be resolved inside %s/ (%s)" % (n, ZONEINFO, e))
             if m.uid != 0 or m.gid != 0:
-                fail("layer content check: %s is not owned by root (uid %d, gid %d)" % (n, m.uid, m.gid))
+                reject("layer content check: %s is not owned by root (uid %d, gid %d)" % (n, m.uid, m.gid))
             if (m.isdir() or m.isreg() or m.islnk()) and m.mode & 0o022:
-                fail("layer content check: %s is group/world-writable" % n)
+                reject("layer content check: %s is group/world-writable" % n)
             if m.isdir():
                 if m.mode & 0o6000:
-                    fail("layer content check: %s is a directory with setuid or setgid bits" % n)
+                    reject("layer content check: %s is a directory with setuid or setgid bits" % n)
             elif m.isreg():
                 if m.mode & 0o7111:
-                    fail("layer content check: %s has setuid, setgid or executable bits" % n)
+                    reject("layer content check: %s has setuid, setgid or executable bits" % n)
             elif m.issym():
                 base = parent.split("/")
                 try:
                     res = resolve(m.linkname, links, None if m.linkname.startswith("/") else base)
                 except Unresolvable as e:
-                    fail("layer content check: %s is a symlink to %s, outside %s/ (%s)" % (n, m.linkname, ZONEINFO, e))
+                    reject("layer content check: %s is a symlink to %s, outside %s/ (%s)" % (n, m.linkname, ZONEINFO, e))
                 if not inside(res, ZONEINFO):
-                    fail("layer content check: %s is a symlink to %s, outside %s/ (resolves to /%s)" % (n, m.linkname, ZONEINFO, res))
+                    reject("layer content check: %s is a symlink to %s, outside %s/ (resolves to /%s)" % (n, m.linkname, ZONEINFO, res))
             elif m.islnk():
                 tgt = norm(m.linkname)
                 if tgt is None:
-                    fail("layer content check: %s is a hard link to %s, outside %s/" % (n, m.linkname, ZONEINFO))
+                    reject("layer content check: %s is a hard link to %s, outside %s/" % (n, m.linkname, ZONEINFO))
                 try:
                     res = resolve(posixpath.dirname(tgt), links)
                 except Unresolvable as e:
-                    fail("layer content check: %s is a hard link to %s, outside %s/ (%s)" % (n, m.linkname, ZONEINFO, e))
+                    reject("layer content check: %s is a hard link to %s, outside %s/ (%s)" % (n, m.linkname, ZONEINFO, e))
                 full = posixpath.join(res, posixpath.basename(tgt))
                 if res != posixpath.dirname(tgt) and inside(full, ZONEINFO):
-                    fail("layer content check: %s is a hard link to %s through a symlinked directory" % (n, m.linkname))
+                    reject("layer content check: %s is a hard link to %s through a symlinked directory" % (n, m.linkname))
                 if not inside(full, ZONEINFO):
-                    fail("layer content check: %s is a hard link to %s, outside %s/" % (n, m.linkname, ZONEINFO))
+                    reject("layer content check: %s is a hard link to %s, outside %s/" % (n, m.linkname, ZONEINFO))
                 if tgt in links:
-                    fail("layer content check: %s is a hard link to the symlink %s; not allowed" % (n, m.linkname))
+                    reject("layer content check: %s is a hard link to the symlink %s; not allowed" % (n, m.linkname))
             else:
-                fail("layer content check: %s has an unsupported entry type" % n)
-            continue
+                reject("layer content check: %s has an unsupported entry type" % n)
+            return
         if n in book or n in extra:
             if not m.isreg():
-                fail("layer content check: %s must be a regular file" % n)
+                reject("layer content check: %s must be a regular file" % n)
             if m.uid != 0 or m.gid != 0:
-                fail("layer content check: %s is not owned by root (uid %d, gid %d)" % (n, m.uid, m.gid))
+                reject("layer content check: %s is not owned by root (uid %d, gid %d)" % (n, m.uid, m.gid))
             if m.mode & 0o022:
-                fail("layer content check: %s is group/world-writable" % n)
+                reject("layer content check: %s is group/world-writable" % n)
+            if n in book and book[n] == 0 and m.size != 0:
+                reject("layer content check: %s must be an empty file (size 0), found %d bytes" % (n, m.size))
             if m.mode & 0o7111:
-                fail("layer content check: %s has setuid, setgid or executable bits" % n)
+                reject("layer content check: %s has setuid, setgid or executable bits" % n)
             if n in extra:
                 h = hashlib.sha256(t.extractfile(m).read()).hexdigest()
                 if h != extra[n]:
-                    fail("layer content check: %s does not match the sha256 pinned in scripts/guacd-layer-allowlist" % n)
-            continue
+                    reject("layer content check: %s does not match the sha256 pinned in scripts/guacd-layer-allowlist" % n)
+            return
         if n in ancestors:
             if not m.isdir():
-                fail("layer content check: %s must be a directory" % n)
+                reject("layer content check: %s must be a directory" % n)
             if n not in parents:
-                fail("layer content check: parent directory %s does not exist in the base" % n)
+                reject("layer content check: parent directory %s does not exist in the base" % n)
             want = parents[n]
             got = (m.mode & 0o7777, m.uid, m.gid)
             if got != want:
-                fail("layer content check: parent directory %s changed mode/uid/gid compared with the base (got %o %d:%d, base %o %d:%d)"
+                reject("layer content check: parent directory %s changed mode/uid/gid compared with the base (got %o %d:%d, base %o %d:%d)"
                      % (n, got[0], got[1], got[2], want[0], want[1], want[2]))
-            continue
-        fail("layer content check: %s is not in scripts/guacd-layer-allowlist%s" % (n, ALLOW_HINT))
+            return
+        reject("layer content check: %s is not in scripts/guacd-layer-allowlist%s" % (n, ALLOW_HINT))
+
+    errors = []
+    for m in members:
+        try:
+            check(m)
+        except Reject as e:
+            errors.append(str(e))
+    if errors:
+        errors = sorted(set(errors))
+        shown = errors[:MAX_REPORTED]
+        more = len(errors) - len(shown)
+        fail("\n".join(shown) + ("\nlayer content check: ... and %d more disallowed entries not shown" % more if more else "")
+             + "\nlayer content check: %d disallowed entr%s in total" % (len(errors), "y" if len(errors) == 1 else "ies"))
     print("ok: layer content check")
 
 
