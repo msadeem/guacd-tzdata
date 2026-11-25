@@ -352,6 +352,17 @@ out="$("$H9/scripts/check-public-hygiene" --repo "$H9" 2>&1)"; rc=$?
 (cd "$H9" && git reset -q --hard HEAD~1 && GIT_COMMITTER_DATE="2026-01-01T10:00:00-0300" git commit -q --allow-empty -m "local committer date")
 out="$("$H9/scripts/check-public-hygiene" --repo "$H9" 2>&1)"; rc=$?
 [[ $rc -eq 1 && "$out" == *"committer date: 1 match(es) of non-utc-date"* ]] && ok "a non-UTC committer date is refused" || bad "non-UTC committer date" "rc=$rc $out"
+H10="$WORK/ghdates"; mkrepo "$H10"
+(cd "$H10" && GIT_AUTHOR_DATE="2026-01-01T10:00:00-0400" GIT_COMMITTER_DATE="2026-01-01T10:00:00-0400" GIT_COMMITTER_NAME=GitHub GIT_COMMITTER_EMAIL=noreply@github.com git commit -q --allow-empty -m "web merge")
+out="$("$H10/scripts/check-public-hygiene" --repo "$H10" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$out" == *"date rule skipped 1 GitHub-made commit(s)"* ]] && ok "a GitHub-committed -0400 commit passes and is counted as skipped" || bad "GitHub-made commit" "rc=$rc $out"
+(cd "$H10" && GIT_AUTHOR_DATE="2026-01-01T10:00:00-0400" GIT_COMMITTER_DATE="2026-01-01T10:00:00-0400" GIT_COMMITTER_NAME=Other GIT_COMMITTER_EMAIL=other@users.noreply.github.com git commit -q --allow-empty -m "same offset, other committer")
+out="$("$H10/scripts/check-public-hygiene" --repo "$H10" 2>&1)"; rc=$?
+[[ $rc -eq 1 && "$out" == *"non-utc-date"* ]] && ok "the same -0400 offset with another committer fails" || bad "other committer same offset" "rc=$rc $out"
+H11="$WORK/ghauthor"; mkrepo "$H11"
+(cd "$H11" && GIT_AUTHOR_NAME=GitHub GIT_AUTHOR_EMAIL=noreply@github.com GIT_AUTHOR_DATE="2026-01-01T10:00:00-0400" git commit -q --allow-empty -m "github author only")
+out="$("$H11/scripts/check-public-hygiene" --repo "$H11" 2>&1)"; rc=$?
+[[ $rc -eq 1 && "$out" == *"author date: 1 match(es) of non-utc-date"* ]] && ok "a GitHub AUTHOR does not exempt a commit" || bad "GitHub author exemption" "rc=$rc $out"
 H4="$WORK/dirty"; mkrepo "$H4"; echo more >> "$H4/a.txt"
 out="$("$H4/scripts/check-public-hygiene" --repo "$H4" 2>&1)"; rc=$?
 [[ $rc -eq 2 && "$out" == *"working tree is dirty; commit or stash before the pre-push scan"* ]] && ok "a dirty working tree is refused (exit 2)" || bad "dirty tree" "rc=$rc $out"
