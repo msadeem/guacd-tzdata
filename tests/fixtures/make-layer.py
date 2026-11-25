@@ -74,6 +74,28 @@ elif case == "whiteout":
     add("usr/share/zoneinfo/.wh.UTC")
 elif case == "hard-out":
     add("usr/share/zoneinfo/Evil", "hard", link="etc/apk/world")
+elif case == "sym-dot-escape":
+    add("usr/share/zoneinfo/s", "sym", 0o777, link=".")
+    add("usr/share/zoneinfo/Evil", "sym", 0o777, link="s/s/s/../../../etc/shadow")
+elif case == "sym-dot-hard":
+    add("usr/share/zoneinfo/s", "sym", 0o777, link=".")
+    add("usr/share/zoneinfo/Hard", "hard", link="usr/share/zoneinfo/s/s/UTC")
+elif case == "hard-via-evil":
+    add("usr/share/zoneinfo/Asia/Hard", "hard", link="usr/share/zoneinfo/Asia/../../../../etc/shadow")
+elif case == "hard-to-symlink":
+    add("usr/share/zoneinfo/Asia/Hard", "hard", link="usr/share/zoneinfo/Asia/Link")
+elif case == "under-symlink-dir":
+    add("usr/share/zoneinfo/D", "sym", 0o777, link="Asia")
+    add("usr/share/zoneinfo/D/x", data=b"x")
+elif case == "sym-loop":
+    add("usr/share/zoneinfo/La", "sym", 0o777, link="Lb")
+    add("usr/share/zoneinfo/Lb", "sym", 0o777, link="La")
+elif case == "world-writable-dir":
+    add("usr/share/zoneinfo/W", "dir", 0o777)
+elif case == "world-writable-file":
+    add("usr/share/zoneinfo/Asia/Ww", mode=0o666)
+elif case == "not-root":
+    add("usr/share/zoneinfo/Asia/Owned", uid=1000, gid=1000)
 elif case == "exec":
     add("usr/share/zoneinfo/Asia/Run", mode=0o755)
 elif case == "setuid":

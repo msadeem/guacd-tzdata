@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import shutil
 import sys
 import tarfile
@@ -76,6 +77,49 @@ def read_parents(path):
     return d
 
 
+MAX_HOPS = 40
+
+
+class Unresolvable(Exception):
+    pass
+
+
+def resolve(path, links, start=None):
+    """Resolve `path` physically, one component at a time, with the layer's own symlink map.
+
+    Returns the resolved path (no leading slash). Every intermediate position must stay inside
+    the zoneinfo tree or be one of its parent directories; otherwise Unresolvable is raised.
+    `start` is the list of components to begin from (default: the root).
+    """
+    ancestors = {"/".join(ZONEINFO.split("/")[:i]) for i in range(0, len(ZONEINFO.split("/")))}
+    cur = list(start or [])
+    pending = path.split("/")
+    hops = 0
+    while pending:
+        c = pending.pop(0)
+        if c in ("", "."):
+            continue
+        if c == "..":
+            if cur:
+                cur.pop()
+        else:
+            cur.append(c)
+            p = "/".join(cur)
+            if p in links:
+                hops += 1
+                if hops > MAX_HOPS:
+                    raise Unresolvable("symlink loop (more than %d hops)" % MAX_HOPS)
+                tgt = links[p]
+                cur.pop()
+                if tgt.startswith("/"):
+                    cur = []
+                pending = tgt.split("/") + pending
+        p = "/".join(cur)
+        if not (inside(p, ZONEINFO) or p in ancestors):
+            raise Unresolvable("passes through /%s" % p)
+    return "/".join(cur)
+
+
 def cmd_layer(layer, tsv, allow):
     book, extra = read_allowlist(allow)
     parents = read_parents(tsv)
@@ -89,9 +133,16 @@ def cmd_layer(layer, tsv, allow):
             ancestors.add("/".join(parts[:i]))
     try:
         t = tarfile.open(layer, "r:*")
+        members = list(t)
     except Exception as e:  # noqa: BLE001
         fail("layer content check: cannot read the layer tar (%s)" % e.__class__.__name__)
-    for m in t:
+    # pass 1: the layer's own symlink map (the base ships no zoneinfo, so every link that matters is here)
+    links = {}
+    for m in members:
+        n = norm(m.name)
+        if n and m.issym():
+            links[n] = m.linkname
+    for m in members:
         raw = m.name
         n = norm(raw)
         if n == "":
@@ -101,6 +152,16 @@ def cmd_layer(layer, tsv, allow):
         if posixpath.basename(n).startswith(".wh."):
             fail("layer content check: %s is a whiteout entry (deleting a base file); not allowed" % n)
         if inside(n, ZONEINFO):
+            parent = posixpath.dirname(n)
+            try:
+                if resolve(parent, links) != parent:
+                    fail("layer content check: %s is under a symlinked directory" % n)
+            except Unresolvable as e:
+                fail("layer content check: %s is under a symlinked directory that cannot be resolved inside %s/ (%s)" % (n, ZONEINFO, e))
+            if m.uid != 0 or m.gid != 0:
+                fail("layer content check: %s is not owned by root (uid %d, gid %d)" % (n, m.uid, m.gid))
+            if (m.isdir() or m.isreg() or m.islnk()) and m.mode & 0o022:
+                fail("layer content check: %s is group/world-writable" % n)
             if m.isdir():
                 if m.mode & 0o6000:
                     fail("layer content check: %s is a directory with setuid or setgid bits" % n)
@@ -108,15 +169,28 @@ def cmd_layer(layer, tsv, allow):
                 if m.mode & 0o7111:
                     fail("layer content check: %s has setuid, setgid or executable bits" % n)
             elif m.issym():
-                tgt = m.linkname
-                tgt = posixpath.normpath(tgt.lstrip("/")) if tgt.startswith("/") else posixpath.normpath(
-                    posixpath.join(posixpath.dirname(n), tgt))
-                if not inside(tgt, ZONEINFO):
-                    fail("layer content check: %s is a symlink to %s, outside %s/" % (n, m.linkname, ZONEINFO))
+                base = parent.split("/")
+                try:
+                    res = resolve(m.linkname, links, None if m.linkname.startswith("/") else base)
+                except Unresolvable as e:
+                    fail("layer content check: %s is a symlink to %s, outside %s/ (%s)" % (n, m.linkname, ZONEINFO, e))
+                if not inside(res, ZONEINFO):
+                    fail("layer content check: %s is a symlink to %s, outside %s/ (resolves to /%s)" % (n, m.linkname, ZONEINFO, res))
             elif m.islnk():
                 tgt = norm(m.linkname)
-                if tgt is None or not inside(tgt, ZONEINFO):
+                if tgt is None:
                     fail("layer content check: %s is a hard link to %s, outside %s/" % (n, m.linkname, ZONEINFO))
+                try:
+                    res = resolve(posixpath.dirname(tgt), links)
+                except Unresolvable as e:
+                    fail("layer content check: %s is a hard link to %s, outside %s/ (%s)" % (n, m.linkname, ZONEINFO, e))
+                full = posixpath.join(res, posixpath.basename(tgt))
+                if res != posixpath.dirname(tgt) and inside(full, ZONEINFO):
+                    fail("layer content check: %s is a hard link to %s through a symlinked directory" % (n, m.linkname))
+                if not inside(full, ZONEINFO):
+                    fail("layer content check: %s is a hard link to %s, outside %s/" % (n, m.linkname, ZONEINFO))
+                if tgt in links:
+                    fail("layer content check: %s is a hard link to the symlink %s; not allowed" % (n, m.linkname))
             else:
                 fail("layer content check: %s has an unsupported entry type" % n)
             continue
@@ -169,6 +243,8 @@ def cmd_unpack(save, outdir, arch="amd64"):
     os.makedirs(outdir, exist_ok=True)
     t = tarfile.open(save, "r:*")
     names = {m.name: m for m in t}
+    if "manifest.json" not in names:
+        fail("unpack: the saved archive has no manifest.json")
     manifest = json.load(t.extractfile(names["manifest.json"]))
     pick = None
     for e in manifest:
@@ -180,6 +256,10 @@ def cmd_unpack(save, outdir, arch="amd64"):
         fail("unpack: no %s image in the saved archive" % arch)
     e, cfg = pick
     json.dump(cfg, open(os.path.join(outdir, "config.json"), "w"))
+    m = re.search(r"([0-9a-f]{64})", e["Config"])
+    if not m:
+        fail("unpack: cannot read the config digest from %s" % e["Config"])
+    open(os.path.join(outdir, "config-digest"), "w").write("sha256:" + m.group(1) + "\n")
     ids = cfg["rootfs"]["diff_ids"]
     open(os.path.join(outdir, "diff_ids"), "w").write("\n".join(ids) + "\n")
     if len(e["Layers"]) != len(ids):

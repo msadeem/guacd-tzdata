@@ -22,7 +22,8 @@
 # stages with hand-made inputs, without Docker. Stages 1 and 4 need a real image.
 #
 # Environment: PLATFORM (default linux/amd64), GUACD_LAYER_ALLOWLIST (default
-# scripts/guacd-layer-allowlist).
+# scripts/guacd-layer-allowlist), GATED_CONFIG_DIGEST_FILE (when set, the passed image's
+# config digest is written there, so a later push can be bound to the gated image).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +36,7 @@ die() { echo "FAIL: $1"; exit 1; }
 stage() { # stage <helper args...>: run a helper subcommand, relay its one line
   local out
   if ! out="$("$@" 2>&1)"; then
-    echo "FAIL: $out"
+    echo "FAIL: $out" >&2
     exit 1
   fi
   echo "$out"
@@ -107,4 +108,7 @@ label="$(docker image inspect --platform "$PLATFORM" --format '{{index .Config.L
   || docker image inspect --format '{{index .Config.Labels "guacd-tzdata.tzdata-version"}}' "$IMAGE")"
 [[ -n "$inst" && "$label" == "$inst" ]] || die "runtime: label guacd-tzdata.tzdata-version is '$label' but apk reports '$inst'"
 echo "ok: runtime checks (zoneinfo, +0500, user guacd, $inst)"
+if [[ -n "${GATED_CONFIG_DIGEST_FILE:-}" ]]; then
+  cp "$WORK/image/config-digest" "$GATED_CONFIG_DIGEST_FILE" || die "cannot write the gated config digest"
+fi
 echo "=== gate passed"
