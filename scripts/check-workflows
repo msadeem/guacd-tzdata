@@ -59,7 +59,11 @@ def jobs_of(lines):
     return out
 
 
-wfs = sorted(glob.glob(os.path.join(root, ".github/workflows/*.yml")))
+KNOWN_WORKFLOWS = {"ci.yml", "publish.yml"}
+wfdir = os.path.join(root, ".github/workflows")
+for extra in sorted(set(os.listdir(wfdir) if os.path.isdir(wfdir) else []) - KNOWN_WORKFLOWS):
+    err("unexpected file .github/workflows/%s (only ci.yml and publish.yml are allowed, so every rule sees every workflow)" % extra)
+wfs = sorted(glob.glob(os.path.join(wfdir, "*.yml")))
 if not wfs:
     err("no workflow files found")
 for wf in wfs:
@@ -72,6 +76,11 @@ for wf in wfs:
             ref = m.group(1)
             if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$", ref):
                 err("%s:%d: 'uses: %s' is not pinned by a full 40-hex commit SHA" % (rel, i, ref))
+    for i, ln in enumerate(lines, 1):
+        if re.match(r"^\s*-?\s*uses:\s*docker/setup-buildx-action@", ln):
+            nxt = [l.strip() for l in lines[i:i + 3]]
+            if "driver: docker" not in nxt:
+                err("%s:%d: docker/setup-buildx-action must set 'driver: docker' (no moving-tag builder image)" % (rel, i))
     if re.search(r"\bpull_request_target\b", text):
         err("%s uses pull_request_target" % rel)
     for t in ("schedule", "workflow_call"):

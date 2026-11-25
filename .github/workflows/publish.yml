@@ -16,8 +16,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The only job that can write: it builds, gates, pushes and attests, and runs no
-  # third-party code that downloads anything at run time.
+  # The only job that can write: it builds, gates, pushes and attests. It uses the
+  # daemon's built-in builder (driver: docker), so no builder image is pulled or started,
+  # and it runs no scanner or other downloader.
   publish:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -46,6 +47,8 @@ jobs:
 
       - name: Set up buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver: docker
 
       - name: Build
         env:
